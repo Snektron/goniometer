@@ -3,6 +3,8 @@ const Profiler = @This();
 const std = @import("std");
 const c = @import("c.zig");
 
+const ProfileQueue = @import("ProfileQueue.zig");
+
 /// Information that is tracket per queue.
 pub const QueueInfo = struct {
     /// The corresponding HSA queue handle.
@@ -16,7 +18,7 @@ a: std.mem.Allocator,
 
 /// The api table that we can use to invoke HSA functions.
 /// Only the core table is relevant, we don't need the extension functions.
-hsa_core: c.CoreApiTable,
+hsa: c.CoreApiTable,
 
 /// The CPU agent that we use to allocate host resources, such as CPU-GPU
 /// shared memory etc.
@@ -28,13 +30,14 @@ aqlprofile: struct {
     start: *const @TypeOf(c.hsa_ven_amd_aqlprofile_start),
 },
 
-/// A map of queue handles to queue state. A queue is identified by its doorbell signal.
-queues: std.AutoArrayHashMapUnmanaged(c.hsa_signal_t, QueueInfo) = .{},
+/// A map of queue handles to queue proxy queues. A queue is identified by its doorbell signal.
+/// TODO: we can get rid of the duplicate signal handle by using a context.
+queues: std.AutoArrayHashMapUnmanaged(c.hsa_signal_t, *ProfileQueue) = .{},
 
 pub fn init(a: std.mem.Allocator, hsa_fns: *c.ApiTable) !Profiler {
     var self = Profiler{
         .a = a,
-        .hsa_core = hsa_fns.core.*,
+        .hsa = hsa_fns.core.*,
         .aqlprofile = undefined,
         .cpu_agent = undefined,
     };
@@ -46,7 +49,7 @@ pub fn init(a: std.mem.Allocator, hsa_fns: *c.ApiTable) !Profiler {
 
     self.aqlprofile.start = self.aqlprofile.lib.lookup(
         *const @TypeOf(c.hsa_ven_amd_aqlprofile_start),
-        "hsa_ven_amd_aqlprofile_start"
+        "hsa_ven_amd_aqlprofile_start",
     ) orelse return error.AqlProfileMissingLibraryFunction;
 
     try self.queryAgents();
@@ -60,7 +63,7 @@ pub fn deinit(self: *Profiler) void {
 }
 
 fn queryAgents(self: *Profiler) !void {
-    const status = self.hsa_core.hsa_iterate_agents_fn(&queryAgentsCbk, self);
+    const status = self.hsa.hsa_iterate_agents_fn(&queryAgentsCbk, self);
     if (status != c.HSA_STATUS_SUCCESS) {
         return error.HsaError;
     }
@@ -70,14 +73,14 @@ fn queryAgentsCbk(agent: c.hsa_agent_t, data: ?*anyopaque) callconv(.C) c.hsa_st
     const profiler = @ptrCast(*Profiler, @alignCast(@alignOf(Profiler), data.?));
 
     var name_buf: [64]u8 = undefined;
-    const name_status = profiler.hsa_core.hsa_agent_get_info_fn(agent, c.HSA_AGENT_INFO_NAME, &name_buf);
+    const name_status = profiler.hsa.hsa_agent_get_info_fn(agent, c.HSA_AGENT_INFO_NAME, &name_buf);
     if (name_status != c.HSA_STATUS_SUCCESS) {
         return name_status;
     }
     const name = std.mem.sliceTo(&name_buf, 0);
 
     var agent_type: c.hsa_device_type_t = undefined;
-    const type_status = profiler.hsa_core.hsa_agent_get_info_fn(agent, c.HSA_AGENT_INFO_DEVICE, &agent_type);
+    const type_status = profiler.hsa.hsa_agent_get_info_fn(agent, c.HSA_AGENT_INFO_DEVICE, &agent_type);
     if (type_status != c.HSA_STATUS_SUCCESS) {
         return type_status;
     }
@@ -99,22 +102,50 @@ fn queryAgentsCbk(agent: c.hsa_agent_t, data: ?*anyopaque) callconv(.C) c.hsa_st
 }
 
 /// Add tracking information for a HSA queue, after it has been created.
-pub fn createQueue(self: *Profiler, queue: *c.hsa_queue_t) !void {
-    const result = try self.queues.getOrPut(self.a, queue.doorbell_signal);
+pub fn createQueue(
+    self: *Profiler,
+    agent: c.hsa_agent_t,
+    size: u32,
+    queue_type: c.hsa_queue_type32_t,
+    callback: ?*const fn(c.hsa_status_t, [*c]c.hsa_queue_t, ?*anyopaque) callconv(.C) void,
+    data: ?*anyopaque,
+    private_segment_size: u32,
+    group_segment_size: u32,
+) !*c.hsa_queue_t {
+    const profile_queue = try ProfileQueue.create(
+        &self.hsa,
+        self.a,
+        agent,
+        size,
+        queue_type,
+        callback,
+        data,
+        private_segment_size,
+        group_segment_size,
+    );
+    errdefer profile_queue.destroy(&self.hsa, self.a);
+
+    const result = try self.queues.getOrPut(self.a, profile_queue.queue.doorbell_signal);
     if (result.found_existing) {
         // Should never happen.
         return error.QueueExists;
     }
 
-    result.value_ptr.* = .{
-        .queue = queue,
-        .last_index = 0,
-    };
+    result.value_ptr.* = profile_queue;
+    return &profile_queue.queue;
 }
 
 /// Remove tracking information for a HSA queue, after it has been destroyed.
 pub fn destroyQueue(self: *Profiler, queue: *c.hsa_queue_t) !void {
-    const ok = self.queues.swapRemove(queue.doorbell_signal);
-    if (!ok)
+    if (self.getProfileQueue(queue)) |profile_queue| {
+        profile_queue.destroy(&self.hsa, self.a);
+        _ = self.queues.swapRemove(queue.doorbell_signal);
+    } else {
         return error.InvalidQueue;
+    }
+}
+
+/// Turn an HSA queue handle into its associated ProfileQueue, if that exists.
+pub fn getProfileQueue(self: *Profiler, queue: *const c.hsa_queue_t) ?*ProfileQueue {
+    return self.queues.get(queue.doorbell_signal);
 }

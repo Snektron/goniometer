@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig");
 const Profiler = @import("Profiler.zig");
+const ProfileQueue = @import("ProfileQueue.zig");
 
 /// The current log level for profiler log messages.
 var log_level: std.log.Level = std.log.default_level;
@@ -26,17 +27,18 @@ fn queueCreate(
     agent: c.hsa_agent_t,
     size: u32,
     queue_type: c.hsa_queue_type32_t,
-    callback: ?*const fn(c.hsa_status_t, [*c]c.hsa_queue_t, ?*anyopaque) callconv(.C) void,
+    callback: ?*const fn (c.hsa_status_t, [*c]c.hsa_queue_t, ?*anyopaque) callconv(.C) void,
     data: ?*anyopaque,
     private_segment_size: u32,
     group_segment_size: u32,
     queue: [*c][*c]c.hsa_queue_t,
 ) callconv(.C) c.hsa_status_t {
-    std.log.debug("testing aqlprofile", .{});
+    // TODO: Thread safety.
+    // std.log.debug("testing aqlprofile", .{});
     // const event = c.hsa_ven_amd_aqlprofile_event_t{
     //     .block_name = c.HSA_VEN_AMD_AQLPROFILE_BLOCK_NAME_SQ,
     //     .block_index = 0,
-    //     .counter_id = 4,
+    //     .counter_id = 0,
     // };
 
     // const params = [_]c.hsa_ven_amd_aqlprofile_parameter_t{
@@ -52,9 +54,9 @@ fn queueCreate(
 
     // var profile = c.hsa_ven_amd_aqlprofile_profile_t{
     //     .agent = agent,
-    //     .type = c.HSA_VEN_AMD_AQLPROFILE_EVENT_TYPE_TRACE,
-    //     .events = null,
-    //     .event_count = 0,
+    //     .type = c.HSA_VEN_AMD_AQLPROFILE_EVENT_TYPE_PMC,
+    //     .events = &event,
+    //     .event_count = 1,
     //     .parameters = &params,
     //     .parameter_count = params.len,
     //     .output_buffer = .{
@@ -82,7 +84,7 @@ fn queueCreate(
     //     std.log.debug("0x{X}", .{cmd});
     // }
 
-    const result = profiler.hsa_core.hsa_queue_create_fn(
+    queue.* = profiler.createQueue(
         agent,
         size,
         queue_type,
@@ -90,55 +92,76 @@ fn queueCreate(
         data,
         private_segment_size,
         group_segment_size,
-        queue,
-    );
-
-    profiler.createQueue(queue.*) catch |err| {
-        std.log.err("failed to track new HSA queue: {s}", .{@errorName(err)});
+    ) catch |err| {
+        std.log.err("failed to wrap HSA queue: {s}", .{@errorName(err)});
+        return switch (err) {
+            error.OutOfMemory => c.HSA_STATUS_ERROR_OUT_OF_RESOURCES,
+            else => c.HSA_STATUS_ERROR,
+        };
     };
 
-    return result;
+    return c.HSA_STATUS_SUCCESS;
 }
 
 fn queueDestroy(queue: [*c]c.hsa_queue_t) callconv(.C) c.hsa_status_t {
+    // TODO: Thread safety
     std.log.debug("queueDestroy", .{});
     profiler.destroyQueue(queue) catch |err| switch (err) {
         error.InvalidQueue => std.log.err("application tried to destroy an invalid queue", .{}),
     };
-    return profiler.hsa_core.hsa_queue_destroy_fn(queue);
+    return c.HSA_STATUS_SUCCESS;
 }
 
 fn signalStore(signal: c.hsa_signal_t, queue_index: c.hsa_signal_value_t) callconv(.C) void {
-    std.log.debug("signalStore: {X} {}", .{ signal.handle, queue_index});
+    std.log.debug("signalStore: 0x{x} {}", .{ signal.handle, queue_index });
 
-    // Get the tracked queue information that fits with this queue
-    const queue_info = profiler.queues.getPtr(signal) orelse {
+    const pq = profiler.queues.get(signal) orelse {
         // No such queue, so this is probably a signal for something else.
-        profiler.hsa_core.hsa_signal_store_relaxed_fn(signal, queue_index);
+        profiler.hsa.hsa_signal_store_relaxed_fn(signal, queue_index);
         return;
     };
 
-    const begin = queue_info.last_index;
-    const end = @intCast(usize, queue_index + 1);
-    queue_info.last_index = end;
+    const begin = @atomicRmw(u64, &pq.read_index, .Xchg, @intCast(u64, queue_index + 1), .Monotonic);
+    const end = @atomicLoad(u64, &pq.write_index, .Monotonic);
 
-    std.log.debug("application submitted {} packet(s)", .{end - begin});
-
-    const queue_base = @ptrCast([*]c.hsa_packet_t, @alignCast(c.hsa_packet_t.alignment, queue_info.queue.base_address.?));
-
+    const packet_buf = pq.packetBuffer();
     var i = begin;
     while (i < end) : (i += 1) {
-        const index = i % queue_info.queue.size;
-        const packet = &queue_base[index];
-        if (packet.packetType() != c.HSA_PACKET_TYPE_KERNEL_DISPATCH)
-            continue;
-
-        // const dispatch_packet = @ptrCast(*c.hsa_kernel_dispatch_packet_t, packet);
-        // TODO: Get kernel name? This is kind of annoying and requires another bunch of extensions,
-        // so maybe do it later.
+        const index = i % pq.queue.size;
+        pq.submit(&profiler.hsa, &packet_buf[index]);
     }
+}
 
-    profiler.hsa_core.hsa_signal_store_relaxed_fn(signal, queue_index);
+fn loadQueueReadIndex(queue: [*c]const c.hsa_queue_t) callconv(.C) u64 {
+    if (profiler.getProfileQueue(queue)) |pq| {
+        return @atomicLoad(u64, &pq.read_index, .Monotonic);
+    } else {
+        return profiler.hsa.hsa_queue_load_read_index_relaxed_fn(queue);
+    }
+}
+
+fn loadQueueWriteIndex(queue: [*c]const c.hsa_queue_t) callconv(.C) u64 {
+    if (profiler.getProfileQueue(queue)) |pq| {
+        return @atomicLoad(u64, &pq.write_index, .Monotonic);
+    } else {
+        return profiler.hsa.hsa_queue_load_write_index_relaxed_fn(queue);
+    }
+}
+
+fn storeQueueWriteIndex(queue: [*c]const c.hsa_queue_t, value: u64) callconv(.C) void {
+    if (profiler.getProfileQueue(queue)) |pq| {
+        @atomicStore(u64, &pq.write_index, value, .Monotonic);
+    } else {
+        profiler.hsa.hsa_queue_store_write_index_relaxed_fn(queue, value);
+    }
+}
+
+fn addQueueWriteIndex(queue: [*c]const c.hsa_queue_t, value: u64) callconv(.C) u64 {
+    if (profiler.getProfileQueue(queue)) |pq| {
+        return @atomicRmw(u64, &pq.write_index, .Add, value, .Monotonic);
+    } else {
+        return profiler.hsa.hsa_queue_add_write_index_relaxed_fn(queue, value);
+    }
 }
 
 export fn OnLoad(
@@ -162,10 +185,27 @@ export fn OnLoad(
     };
 
     std.log.debug("overriding hsa functions", .{});
-    table.core.hsa_signal_store_relaxed_fn = &signalStore;
-    table.core.hsa_signal_store_screlease_fn = &signalStore;
     table.core.hsa_queue_create_fn = &queueCreate;
     table.core.hsa_queue_destroy_fn = &queueDestroy;
+
+    table.core.hsa_signal_store_relaxed_fn = &signalStore;
+    table.core.hsa_signal_store_screlease_fn = &signalStore;
+
+    // TODO: Override the remaining queue functions, for good measure.
+    // TODO: Use the proper atomic ordering.
+    table.core.hsa_queue_load_read_index_relaxed_fn = &loadQueueReadIndex;
+    table.core.hsa_queue_load_read_index_scacquire_fn = &loadQueueReadIndex;
+
+    table.core.hsa_queue_load_write_index_relaxed_fn = &loadQueueWriteIndex;
+    table.core.hsa_queue_load_write_index_scacquire_fn = &loadQueueWriteIndex;
+
+    table.core.hsa_queue_store_write_index_relaxed_fn = &storeQueueWriteIndex;
+    table.core.hsa_queue_store_write_index_screlease_fn = &storeQueueWriteIndex;
+
+    table.core.hsa_queue_add_write_index_scacq_screl_fn = &addQueueWriteIndex;
+    table.core.hsa_queue_add_write_index_scacquire_fn = &addQueueWriteIndex;
+    table.core.hsa_queue_add_write_index_relaxed_fn = &addQueueWriteIndex;
+    table.core.hsa_queue_add_write_index_screlease_fn = &addQueueWriteIndex;
 
     return true;
 }
