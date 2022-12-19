@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("c.zig");
+const hsa_util = @import("hsa_util.zig");
 const Profiler = @import("Profiler.zig");
 const ProfileQueue = @import("ProfileQueue.zig");
 
@@ -95,8 +96,8 @@ fn queueCreate(
     ) catch |err| {
         std.log.err("failed to wrap HSA queue: {s}", .{@errorName(err)});
         return switch (err) {
-            error.OutOfMemory => c.HSA_STATUS_ERROR_OUT_OF_RESOURCES,
-            else => c.HSA_STATUS_ERROR,
+            error.QueueExists => c.HSA_STATUS_ERROR,
+            else => |e| hsa_util.toStatus(e),
         };
     };
 
@@ -117,7 +118,7 @@ fn signalStore(signal: c.hsa_signal_t, queue_index: c.hsa_signal_value_t) callco
 
     const pq = profiler.queues.get(signal) orelse {
         // No such queue, so this is probably a signal for something else.
-        profiler.hsa.hsa_signal_store_relaxed_fn(signal, queue_index);
+        profiler.hsa.signal_store_relaxed(signal, queue_index);
         return;
     };
 
@@ -128,7 +129,14 @@ fn signalStore(signal: c.hsa_signal_t, queue_index: c.hsa_signal_value_t) callco
     var i = begin;
     while (i < end) : (i += 1) {
         const index = i % pq.queue.size;
-        pq.submit(&profiler.hsa, &packet_buf[index]);
+        const packet = &packet_buf[index];
+        if (packet.packetType() == c.HSA_PACKET_TYPE_KERNEL_DISPATCH) {
+            profiler.startTrace(pq);
+            pq.submit(&profiler.hsa, packet);
+            profiler.stopTrace(pq);
+        } else {
+            pq.submit(&profiler.hsa, packet);
+        }
     }
 }
 
@@ -136,7 +144,7 @@ fn loadQueueReadIndex(queue: [*c]const c.hsa_queue_t) callconv(.C) u64 {
     if (profiler.getProfileQueue(queue)) |pq| {
         return @atomicLoad(u64, &pq.read_index, .Monotonic);
     } else {
-        return profiler.hsa.hsa_queue_load_read_index_relaxed_fn(queue);
+        return profiler.hsa.queue_load_read_index_relaxed(queue);
     }
 }
 
@@ -144,7 +152,7 @@ fn loadQueueWriteIndex(queue: [*c]const c.hsa_queue_t) callconv(.C) u64 {
     if (profiler.getProfileQueue(queue)) |pq| {
         return @atomicLoad(u64, &pq.write_index, .Monotonic);
     } else {
-        return profiler.hsa.hsa_queue_load_write_index_relaxed_fn(queue);
+        return profiler.hsa.queue_load_write_index_relaxed(queue);
     }
 }
 
@@ -152,7 +160,7 @@ fn storeQueueWriteIndex(queue: [*c]const c.hsa_queue_t, value: u64) callconv(.C)
     if (profiler.getProfileQueue(queue)) |pq| {
         @atomicStore(u64, &pq.write_index, value, .Monotonic);
     } else {
-        profiler.hsa.hsa_queue_store_write_index_relaxed_fn(queue, value);
+        profiler.hsa.queue_store_write_index_relaxed(queue, value);
     }
 }
 
@@ -160,7 +168,7 @@ fn addQueueWriteIndex(queue: [*c]const c.hsa_queue_t, value: u64) callconv(.C) u
     if (profiler.getProfileQueue(queue)) |pq| {
         return @atomicRmw(u64, &pq.write_index, .Add, value, .Monotonic);
     } else {
-        return profiler.hsa.hsa_queue_add_write_index_relaxed_fn(queue, value);
+        return profiler.hsa.queue_add_write_index_relaxed(queue, value);
     }
 }
 
@@ -185,27 +193,27 @@ export fn OnLoad(
     };
 
     std.log.debug("overriding hsa functions", .{});
-    table.core.hsa_queue_create_fn = &queueCreate;
-    table.core.hsa_queue_destroy_fn = &queueDestroy;
+    table.core.queue_create = &queueCreate;
+    table.core.queue_destroy = &queueDestroy;
 
-    table.core.hsa_signal_store_relaxed_fn = &signalStore;
-    table.core.hsa_signal_store_screlease_fn = &signalStore;
+    table.core.signal_store_relaxed = &signalStore;
+    table.core.signal_store_screlease = &signalStore;
 
     // TODO: Override the remaining queue functions, for good measure.
     // TODO: Use the proper atomic ordering.
-    table.core.hsa_queue_load_read_index_relaxed_fn = &loadQueueReadIndex;
-    table.core.hsa_queue_load_read_index_scacquire_fn = &loadQueueReadIndex;
+    table.core.queue_load_read_index_relaxed = &loadQueueReadIndex;
+    table.core.queue_load_read_index_scacquire = &loadQueueReadIndex;
 
-    table.core.hsa_queue_load_write_index_relaxed_fn = &loadQueueWriteIndex;
-    table.core.hsa_queue_load_write_index_scacquire_fn = &loadQueueWriteIndex;
+    table.core.queue_load_write_index_relaxed = &loadQueueWriteIndex;
+    table.core.queue_load_write_index_scacquire = &loadQueueWriteIndex;
 
-    table.core.hsa_queue_store_write_index_relaxed_fn = &storeQueueWriteIndex;
-    table.core.hsa_queue_store_write_index_screlease_fn = &storeQueueWriteIndex;
+    table.core.queue_store_write_index_relaxed = &storeQueueWriteIndex;
+    table.core.queue_store_write_index_screlease = &storeQueueWriteIndex;
 
-    table.core.hsa_queue_add_write_index_scacq_screl_fn = &addQueueWriteIndex;
-    table.core.hsa_queue_add_write_index_scacquire_fn = &addQueueWriteIndex;
-    table.core.hsa_queue_add_write_index_relaxed_fn = &addQueueWriteIndex;
-    table.core.hsa_queue_add_write_index_screlease_fn = &addQueueWriteIndex;
+    table.core.queue_add_write_index_scacq_screl = &addQueueWriteIndex;
+    table.core.queue_add_write_index_scacquire = &addQueueWriteIndex;
+    table.core.queue_add_write_index_relaxed = &addQueueWriteIndex;
+    table.core.queue_add_write_index_screlease = &addQueueWriteIndex;
 
     return true;
 }

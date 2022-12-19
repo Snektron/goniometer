@@ -4,6 +4,10 @@ const ProfileQueue = @This();
 
 const std = @import("std");
 const c = @import("c.zig");
+const hsa_util = @import("hsa_util.zig");
+
+/// The agent that created this queue
+agent: c.hsa_agent_t,
 
 /// The real queue that commands will be submitted to.
 backing_queue: *c.hsa_queue_t,
@@ -23,7 +27,7 @@ pub fn create(
     agent: c.hsa_agent_t,
     size: u32,
     queue_type: c.hsa_queue_type32_t,
-    callback: ?*const fn(c.hsa_status_t, [*c]c.hsa_queue_t, ?*anyopaque) callconv(.C) void,
+    callback: ?*const fn (c.hsa_status_t, [*c]c.hsa_queue_t, ?*anyopaque) callconv(.C) void,
     data: ?*anyopaque,
     private_segment_size: u32,
     group_segment_size: u32,
@@ -35,8 +39,7 @@ pub fn create(
     _ = group_segment_size;
 
     var backing_queue: [*c]c.hsa_queue_t = undefined;
-    var status: c.hsa_status_t = c.HSA_STATUS_SUCCESS;
-    status = hsa.hsa_queue_create_fn(
+    try hsa_util.check(hsa.queue_create(
         agent,
         size,
         c.HSA_QUEUE_TYPE_MULTI,
@@ -45,23 +48,20 @@ pub fn create(
         std.math.maxInt(u32), // This is what rocprof does.
         std.math.maxInt(u32), // This is what rocprof does.
         &backing_queue,
-    );
-    if (status != c.HSA_STATUS_SUCCESS)
-        return error.HsaError; // TODO: Maybe report proper error.
-    errdefer _ = hsa.hsa_queue_destroy_fn(backing_queue);
+    ));
+    errdefer _ = hsa.queue_destroy(backing_queue);
 
     // Create our own packet buffer, doorbell, etc.
     var doorbell: c.hsa_signal_t = undefined;
-    status = hsa.hsa_signal_create_fn(1, 0, null, &doorbell);
-    if (status != c.HSA_STATUS_SUCCESS)
-        return error.HsaError; // TODO: Maybe report proper error.
-    errdefer _ = hsa.hsa_signal_destroy_fn(doorbell);
+    try hsa_util.check(hsa.signal_create(1, 0, null, &doorbell));
+    errdefer _ = hsa.signal_destroy(doorbell);
 
     const packet_buf = try a.allocWithOptions(c.hsa_packet_t, size, c.hsa_packet_t.alignment, null);
     errdefer a.free(packet_buf);
 
     const self = try a.create(ProfileQueue); // Needs to be pinned in memory.
     self.* = ProfileQueue{
+        .agent = agent,
         .backing_queue = backing_queue,
         .queue = .{
             .type = backing_queue.*.type,
@@ -79,8 +79,8 @@ pub fn create(
 }
 
 pub fn destroy(self: *ProfileQueue, hsa: *const c.CoreApiTable, a: std.mem.Allocator) void {
-    _ = hsa.hsa_queue_destroy_fn(self.backing_queue);
-    _ = hsa.hsa_signal_destroy_fn(self.queue.doorbell_signal);
+    _ = hsa.queue_destroy(self.backing_queue);
+    _ = hsa.signal_destroy(self.queue.doorbell_signal);
     a.free(self.packetBuffer());
     a.destroy(self);
 }
@@ -95,12 +95,12 @@ pub fn backingPacketBuffer(self: *ProfileQueue) []c.hsa_packet_t {
 
 /// Submit a generic packet to an HSA queue. This function may block until there is enough
 /// room for the packet.
-pub fn submit(self: *ProfileQueue, hsa: *c.CoreApiTable, packet: *const c.hsa_packet_t) void {
-    const write_index = hsa.hsa_queue_add_write_index_scacq_screl_fn(self.backing_queue, 1);
+pub fn submit(self: *ProfileQueue, hsa: *const c.CoreApiTable, packet: *const c.hsa_packet_t) void {
+    const write_index = hsa.queue_add_write_index_scacq_screl(self.backing_queue, 1);
 
     // Busy loop until there is space.
     // TODO: Maybe this can be improved or something?
-    while (write_index - hsa.hsa_queue_load_read_index_relaxed_fn(self.backing_queue) >= self.backing_queue.size) {
+    while (write_index - hsa.queue_load_read_index_relaxed(self.backing_queue) >= self.backing_queue.size) {
         continue;
     }
 
@@ -117,5 +117,5 @@ pub fn submit(self: *ProfileQueue, hsa: *c.CoreApiTable, packet: *const c.hsa_pa
     @atomicStore(u16, &slot.header, packet.header, .Release);
 
     // Finally, ring the doorbell to notify the agent of the updated packet.
-    hsa.hsa_signal_store_relaxed_fn(self.backing_queue.doorbell_signal, @intCast(i64, write_index));
+    hsa.signal_store_relaxed(self.backing_queue.doorbell_signal, @intCast(i64, write_index));
 }
