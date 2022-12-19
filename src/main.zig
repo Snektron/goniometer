@@ -2,7 +2,6 @@ const std = @import("std");
 const c = @import("c.zig");
 const hsa_util = @import("hsa_util.zig");
 const Profiler = @import("Profiler.zig");
-const ProfileQueue = @import("ProfileQueue.zig");
 
 /// The current log level for profiler log messages.
 var log_level: std.log.Level = std.log.default_level;
@@ -132,10 +131,10 @@ fn signalStore(signal: c.hsa_signal_t, queue_index: c.hsa_signal_value_t) callco
         const packet = &packet_buf[index];
         if (packet.packetType() == c.HSA_PACKET_TYPE_KERNEL_DISPATCH) {
             profiler.startTrace(pq);
-            pq.submit(&profiler.hsa, packet);
+            profiler.submit(pq, packet);
             profiler.stopTrace(pq);
         } else {
-            pq.submit(&profiler.hsa, packet);
+            profiler.submit(pq, packet);
         }
     }
 }
