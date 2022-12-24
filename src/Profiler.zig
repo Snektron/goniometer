@@ -4,6 +4,22 @@ const std = @import("std");
 const c = @import("c.zig");
 const hsa_util = @import("hsa_util.zig");
 
+/// The default size of the thread trace buffer, values taken from rocprof/mesa.
+const thread_trace_buffer_size = 32 * 1024 * 1024;
+
+const sqtt_buffer_align_shift = 12;
+const sqtt_buffer_align = 1 << sqtt_buffer_align_shift;
+
+/// Taken from mesa.
+const ThreadTraceInfo = extern struct {
+    cur_offset: u32,
+    trace_status: u32,
+    arch: extern union {
+        gfx9_write_counter: u32,
+        gfx10_dropped_cntr: u32,
+    },
+};
+
 /// A proxy HSA queue that we can use to intercept HSA packets.
 pub const ProfileQueue = struct {
     /// The agent that created this queue
@@ -16,6 +32,11 @@ pub const ProfileQueue = struct {
     read_index: u64,
     /// The write index for the queue's ring buffer.
     write_index: u64,
+    /// The output buffer for thread trace data.
+    /// There is only ever one trace per queue active, so we can
+    /// just preallocate it once.
+    /// NOTE: GPU memory, not accessible from host!
+    thread_trace: []u8,
 
     pub fn packetBuffer(self: *ProfileQueue) []c.hsa_packet_t {
         return @ptrCast(
@@ -24,7 +45,7 @@ pub const ProfileQueue = struct {
         )[0..self.queue.size];
     }
 
-    pub fn backingPacketBuffer(self: *ProfileQueue) []c.hsa_packet_t {
+    fn backingPacketBuffer(self: *ProfileQueue) []c.hsa_packet_t {
         return @ptrCast(
             [*]c.hsa_packet_t,
             @alignCast(c.hsa_packet_t.alignment, self.backing_queue.base_address.?
@@ -40,7 +61,17 @@ pub const AgentInfo = struct {
     primary_pool: c.hsa_amd_memory_pool_t,
     /// The number of shader engines in this agent. Only valid if
     /// `agent_type` is GPU.
-    shader_engines: u32,
+    shader_engines: ?u32,
+
+    fn threadTraceBufferSize(self: AgentInfo) usize {
+        // For CPUs, cheat by returning 1 byte.
+        const se = self.shader_engines orelse return 1;
+
+        // Computation from mesa radv_sqtt.c
+        const aligned_buffer_size = std.mem.alignForward(thread_trace_buffer_size, sqtt_buffer_align);
+        return std.mem.alignForward(@sizeOf(ThreadTraceInfo) * se, sqtt_buffer_align) +
+            std.mem.alignForward(aligned_buffer_size * se, sqtt_buffer_align);
+    }
 };
 
 /// The allocator to use for profiling data.
@@ -114,13 +145,15 @@ fn queryAgents(self: *Profiler) !void {
 
         std.log.info("system has agent '{s}' of type {s}", .{ name, type_str });
 
-        var shader_engines: u32 = undefined;
+        var maybe_shader_engines: ?u32 = null;
         switch (agent_type) {
             c.HSA_DEVICE_TYPE_CPU => {
                 self.cpu_agent = @intCast(u32, i);
             },
             c.HSA_DEVICE_TYPE_GPU => {
+                var shader_engines: u32 = undefined;
                 try hsa_util.check(self.hsa.agent_get_info(agent, c.HSA_AMD_AGENT_INFO_NUM_SHADER_ENGINES, &shader_engines));
+                maybe_shader_engines = shader_engines;
             },
             else => {},
         }
@@ -140,11 +173,10 @@ fn queryAgents(self: *Profiler) !void {
             else => |e| try hsa_util.check(e),
         }
 
-
         self.agents.values()[i] = .{
             .agent_type = agent_type,
             .primary_pool = ctx.primary_pool,
-            .shader_engines = shader_engines,
+            .shader_engines = maybe_shader_engines,
         };
     }
 }
@@ -182,6 +214,7 @@ const QueryAgentPoolsCtx = struct {
         if (!runtime_alloc_allowed)
             return c.HSA_STATUS_SUCCESS;
 
+        ctx.primary_pool = pool;
         return c.HSA_STATUS_INFO_BREAK;
     }
 };
@@ -232,6 +265,18 @@ pub fn createQueue(
     const packet_buf = try self.a.allocWithOptions(c.hsa_packet_t, size, c.hsa_packet_t.alignment, null);
     errdefer self.a.free(packet_buf);
 
+    const agent_info = self.agents.get(agent).?;
+    // TODO: Allocate the thread trace data in vram for now. Maybe it should be in some shared
+    // region though?
+    const total_trace_size = agent_info.threadTraceBufferSize();
+    var thread_trace_data: [*]u8 = undefined;
+    try hsa_util.check(self.hsa_amd.memory_pool_allocate(
+        agent_info.primary_pool,
+        total_trace_size,
+        0,
+        @ptrCast(*?*anyopaque, &thread_trace_data),
+    ));
+
     const pq = try self.a.create(ProfileQueue); // Needs to be pinned in memory.
     pq.* = ProfileQueue{
         .agent = agent,
@@ -247,12 +292,13 @@ pub fn createQueue(
         },
         .read_index = 0,
         .write_index = 0,
+        .thread_trace = thread_trace_data[0..total_trace_size],
     };
 
     const result = try self.queues.getOrPut(self.a, doorbell);
     if (result.found_existing) {
         // Should never happen.
-        return error.QueueExists;
+        unreachable;
     }
     result.value_ptr.* = pq;
     return &pq.queue;
@@ -263,6 +309,7 @@ pub fn destroyQueue(self: *Profiler, queue: *c.hsa_queue_t) !void {
     const pq = self.getProfileQueue(queue) orelse return error.InvalidQueue;
     _ = self.hsa.queue_destroy(pq.backing_queue);
     _ = self.hsa.signal_destroy(pq.queue.doorbell_signal);
+    _ = self.hsa_amd.memory_pool_free(pq.thread_trace.ptr);
     self.a.free(pq.packetBuffer());
     self.a.destroy(pq);
 }

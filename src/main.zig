@@ -33,57 +33,6 @@ fn queueCreate(
     group_segment_size: u32,
     queue: [*c][*c]c.hsa_queue_t,
 ) callconv(.C) c.hsa_status_t {
-    // TODO: Thread safety.
-    // std.log.debug("testing aqlprofile", .{});
-    // const event = c.hsa_ven_amd_aqlprofile_event_t{
-    //     .block_name = c.HSA_VEN_AMD_AQLPROFILE_BLOCK_NAME_SQ,
-    //     .block_index = 0,
-    //     .counter_id = 0,
-    // };
-
-    // const params = [_]c.hsa_ven_amd_aqlprofile_parameter_t{
-    //     .{
-    //         .parameter_name = c.HSA_VEN_AMD_AQLPROFILE_PARAMETER_NAME_MASK,
-    //         .value = 0,
-    //     },
-    //     .{
-    //         .parameter_name = c.HSA_VEN_AMD_AQLPROFILE_PARAMETER_NAME_TOKEN_MASK,
-    //         .value = 0,
-    //     },
-    // };
-
-    // var profile = c.hsa_ven_amd_aqlprofile_profile_t{
-    //     .agent = agent,
-    //     .type = c.HSA_VEN_AMD_AQLPROFILE_EVENT_TYPE_PMC,
-    //     .events = &event,
-    //     .event_count = 1,
-    //     .parameters = &params,
-    //     .parameter_count = params.len,
-    //     .output_buffer = .{
-    //         .ptr = null,
-    //         .size = 0,
-    //     },
-    //     .command_buffer = .{
-    //         .ptr = null,
-    //         .size = 0,
-    //     },
-    // };
-
-    // var start_packet: c.hsa_ext_amd_aql_pm4_packet_t = undefined;
-    // const status = profiler.aqlprofile.start(&profile, &start_packet);
-    // std.log.debug("status: {}", .{status});
-    // std.debug.assert(status == c.HSA_STATUS_SUCCESS);
-
-    // std.log.debug("output buffer: {}", .{ profile.output_buffer });
-    // std.log.debug("command buffer: {}", .{ profile.command_buffer });
-
-    // std.log.debug("seems to be OK", .{});
-    // std.log.debug("packet dump:", .{});
-    // std.log.debug("  header: 0x{X}", .{start_packet.header});
-    // for (start_packet.pm4_command) |cmd| {
-    //     std.log.debug("0x{X}", .{cmd});
-    // }
-
     queue.* = profiler.createQueue(
         agent,
         size,
@@ -94,10 +43,7 @@ fn queueCreate(
         group_segment_size,
     ) catch |err| {
         std.log.err("failed to wrap HSA queue: {s}", .{@errorName(err)});
-        return switch (err) {
-            error.QueueExists => c.HSA_STATUS_ERROR,
-            else => |e| hsa_util.toStatus(e),
-        };
+        return hsa_util.toStatus(err);
     };
 
     return c.HSA_STATUS_SUCCESS;
@@ -191,7 +137,6 @@ export fn OnLoad(
         return false;
     };
 
-    std.log.debug("overriding hsa functions", .{});
     table.core.queue_create = &queueCreate;
     table.core.queue_destroy = &queueDestroy;
 
