@@ -6,6 +6,9 @@ const hsa_util = @import("hsa_util.zig");
 
 /// The default size of the thread trace buffer, values taken from rocprof/mesa.
 const thread_trace_buffer_size = 32 * 1024 * 1024;
+/// The default size for the start command buffer. Increase as needed, but should be aligned
+/// to page size (0x1000) in bytes. Note: size is in words.
+const start_cmd_size = 1024;
 
 const sqtt_buffer_align_shift = 12;
 const sqtt_buffer_align = 1 << sqtt_buffer_align_shift;
@@ -35,8 +38,9 @@ pub const ProfileQueue = struct {
     /// The output buffer for thread trace data.
     /// There is only ever one trace per queue active, so we can
     /// just preallocate it once.
-    /// NOTE: GPU memory, not accessible from host!
     thread_trace: []u8,
+    // PM4 command buffer that contains the command that starts tracing.
+    // start_command: []u32,
 
     pub fn packetBuffer(self: *ProfileQueue) []c.hsa_packet_t {
         return @ptrCast(
@@ -265,17 +269,16 @@ pub fn createQueue(
     const packet_buf = try self.a.allocWithOptions(c.hsa_packet_t, size, c.hsa_packet_t.alignment, null);
     errdefer self.a.free(packet_buf);
 
+    // Allocate the thread trace in GPU-accessible host memory.
+    const cpu_agent_info = self.agents.values()[self.cpu_agent];
     const agent_info = self.agents.get(agent).?;
-    // TODO: Allocate the thread trace data in vram for now. Maybe it should be in some shared
-    // region though?
-    const total_trace_size = agent_info.threadTraceBufferSize();
-    var thread_trace_data: [*]u8 = undefined;
-    try hsa_util.check(self.hsa_amd.memory_pool_allocate(
-        agent_info.primary_pool,
-        total_trace_size,
-        0,
-        @ptrCast(*?*anyopaque, &thread_trace_data),
-    ));
+    const thread_trace = try hsa_util.alloc(
+        &self.hsa_amd,
+        cpu_agent_info.primary_pool,
+        agent_info.threadTraceBufferSize(),
+    );
+    errdefer hsa_util.free(&self.hsa_amd, thread_trace);
+    try hsa_util.allowAccess(&self.hsa_amd, thread_trace.ptr, &.{agent});
 
     const pq = try self.a.create(ProfileQueue); // Needs to be pinned in memory.
     pq.* = ProfileQueue{
@@ -292,7 +295,7 @@ pub fn createQueue(
         },
         .read_index = 0,
         .write_index = 0,
-        .thread_trace = thread_trace_data[0..total_trace_size],
+        .thread_trace = thread_trace,
     };
 
     const result = try self.queues.getOrPut(self.a, doorbell);
@@ -309,7 +312,7 @@ pub fn destroyQueue(self: *Profiler, queue: *c.hsa_queue_t) !void {
     const pq = self.getProfileQueue(queue) orelse return error.InvalidQueue;
     _ = self.hsa.queue_destroy(pq.backing_queue);
     _ = self.hsa.signal_destroy(pq.queue.doorbell_signal);
-    _ = self.hsa_amd.memory_pool_free(pq.thread_trace.ptr);
+    hsa_util.free(&self.hsa_amd, pq.thread_trace);
     self.a.free(pq.packetBuffer());
     self.a.destroy(pq);
 }
