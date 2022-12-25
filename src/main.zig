@@ -51,7 +51,6 @@ fn queueCreate(
 
 fn queueDestroy(queue: [*c]c.hsa_queue_t) callconv(.C) c.hsa_status_t {
     // TODO: Thread safety
-    std.log.debug("queueDestroy", .{});
     profiler.destroyQueue(queue) catch |err| switch (err) {
         error.InvalidQueue => std.log.err("application tried to destroy an invalid queue", .{}),
     };
@@ -59,8 +58,6 @@ fn queueDestroy(queue: [*c]c.hsa_queue_t) callconv(.C) c.hsa_status_t {
 }
 
 fn signalStore(signal: c.hsa_signal_t, queue_index: c.hsa_signal_value_t) callconv(.C) void {
-    std.log.debug("signalStore: 0x{x} {}", .{ signal.handle, queue_index });
-
     const pq = profiler.queues.get(signal) orelse {
         // No such queue, so this is probably a signal for something else.
         profiler.hsa.signal_store_relaxed(signal, queue_index);

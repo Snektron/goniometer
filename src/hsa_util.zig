@@ -122,7 +122,7 @@ pub fn toStatus(err: (Error || error{OutOfMemory})) c.hsa_status_t {
     };
 }
 
-pub fn alloc(hsa_amd: *c.AmdExtTable, pool: c.hsa_amd_memory_pool_t, size: usize) ![]u8 {
+pub fn alloc(hsa_amd: *const c.AmdExtTable, pool: c.hsa_amd_memory_pool_t, size: usize) ![]u8 {
     var buf: [*]u8 = undefined;
     try check(hsa_amd.memory_pool_allocate(
         pool,
@@ -133,7 +133,7 @@ pub fn alloc(hsa_amd: *c.AmdExtTable, pool: c.hsa_amd_memory_pool_t, size: usize
     return buf[0..size];
 }
 
-pub fn free(hsa_amd: *c.AmdExtTable, buf: anytype) void {
+pub fn free(hsa_amd: *const c.AmdExtTable, buf: anytype) void {
     const ptr = switch (@typeInfo(@TypeOf(buf)).Pointer.size) {
         .Slice => buf.ptr,
         else => buf,
@@ -141,7 +141,7 @@ pub fn free(hsa_amd: *c.AmdExtTable, buf: anytype) void {
     std.debug.assert(hsa_amd.memory_pool_free(ptr) == c.HSA_STATUS_SUCCESS);
 }
 
-pub fn allowAccess(hsa_amd: *c.AmdExtTable, ptr: anytype, agents: []const c.hsa_agent_t) !void {
+pub fn allowAccess(hsa_amd: *const c.AmdExtTable, ptr: anytype, agents: []const c.hsa_agent_t) !void {
     try check(hsa_amd.agents_allow_access(
         @intCast(u32, agents.len),
         agents.ptr,

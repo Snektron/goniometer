@@ -3,25 +3,10 @@ const Profiler = @This();
 const std = @import("std");
 const c = @import("c.zig");
 const hsa_util = @import("hsa_util.zig");
+const ThreadTrace = @import("ThreadTrace.zig");
+const pm4 = @import("pm4.zig");
 
-/// The default size of the thread trace buffer, values taken from rocprof/mesa.
-const thread_trace_buffer_size = 32 * 1024 * 1024;
-/// The default size for the start command buffer. Increase as needed, but should be aligned
-/// to page size (0x1000) in bytes. Note: size is in words.
-const start_cmd_size = 1024;
-
-const sqtt_buffer_align_shift = 12;
-const sqtt_buffer_align = 1 << sqtt_buffer_align_shift;
-
-/// Taken from mesa.
-const ThreadTraceInfo = extern struct {
-    cur_offset: u32,
-    trace_status: u32,
-    arch: extern union {
-        gfx9_write_counter: u32,
-        gfx10_dropped_cntr: u32,
-    },
-};
+const stop_trace_signal_timeout_ns = std.time.ns_per_s * 10;
 
 /// A proxy HSA queue that we can use to intercept HSA packets.
 pub const ProfileQueue = struct {
@@ -35,12 +20,8 @@ pub const ProfileQueue = struct {
     read_index: u64,
     /// The write index for the queue's ring buffer.
     write_index: u64,
-    /// The output buffer for thread trace data.
-    /// There is only ever one trace per queue active, so we can
-    /// just preallocate it once.
-    thread_trace: []u8,
-    // PM4 command buffer that contains the command that starts tracing.
-    // start_command: []u32,
+    /// Thread trace data.
+    thread_trace: ThreadTrace,
 
     pub fn packetBuffer(self: *ProfileQueue) []c.hsa_packet_t {
         return @ptrCast(
@@ -50,10 +31,7 @@ pub const ProfileQueue = struct {
     }
 
     fn backingPacketBuffer(self: *ProfileQueue) []c.hsa_packet_t {
-        return @ptrCast(
-            [*]c.hsa_packet_t,
-            @alignCast(c.hsa_packet_t.alignment, self.backing_queue.base_address.?
-        ))[0..self.backing_queue.size];
+        return @ptrCast([*]c.hsa_packet_t, @alignCast(c.hsa_packet_t.alignment, self.backing_queue.base_address.?))[0..self.backing_queue.size];
     }
 };
 
@@ -66,16 +44,6 @@ pub const AgentInfo = struct {
     /// The number of shader engines in this agent. Only valid if
     /// `agent_type` is GPU.
     shader_engines: ?u32,
-
-    fn threadTraceBufferSize(self: AgentInfo) usize {
-        // For CPUs, cheat by returning 1 byte.
-        const se = self.shader_engines orelse return 1;
-
-        // Computation from mesa radv_sqtt.c
-        const aligned_buffer_size = std.mem.alignForward(thread_trace_buffer_size, sqtt_buffer_align);
-        return std.mem.alignForward(@sizeOf(ThreadTraceInfo) * se, sqtt_buffer_align) +
-            std.mem.alignForward(aligned_buffer_size * se, sqtt_buffer_align);
-    }
 };
 
 /// The allocator to use for profiling data.
@@ -272,13 +240,15 @@ pub fn createQueue(
     // Allocate the thread trace in GPU-accessible host memory.
     const cpu_agent_info = self.agents.values()[self.cpu_agent];
     const agent_info = self.agents.get(agent).?;
-    const thread_trace = try hsa_util.alloc(
+
+    var thread_trace = try ThreadTrace.init(
+        &self.hsa,
         &self.hsa_amd,
         cpu_agent_info.primary_pool,
-        agent_info.threadTraceBufferSize(),
+        agent,
+        agent_info,
     );
-    errdefer hsa_util.free(&self.hsa_amd, thread_trace);
-    try hsa_util.allowAccess(&self.hsa_amd, thread_trace.ptr, &.{agent});
+    errdefer thread_trace.deinit(&self.hsa, &self.hsa_amd);
 
     const pq = try self.a.create(ProfileQueue); // Needs to be pinned in memory.
     pq.* = ProfileQueue{
@@ -310,9 +280,9 @@ pub fn createQueue(
 /// Remove tracking information for a HSA queue, after it has been destroyed.
 pub fn destroyQueue(self: *Profiler, queue: *c.hsa_queue_t) !void {
     const pq = self.getProfileQueue(queue) orelse return error.InvalidQueue;
-    _ = self.hsa.queue_destroy(pq.backing_queue);
-    _ = self.hsa.signal_destroy(pq.queue.doorbell_signal);
-    hsa_util.free(&self.hsa_amd, pq.thread_trace);
+    std.debug.assert(self.hsa.queue_destroy(pq.backing_queue) == c.HSA_STATUS_SUCCESS);
+    std.debug.assert(self.hsa.signal_destroy(pq.queue.doorbell_signal) == c.HSA_STATUS_SUCCESS);
+    pq.thread_trace.deinit(&self.hsa, &self.hsa_amd);
     self.a.free(pq.packetBuffer());
     self.a.destroy(pq);
 }
@@ -356,12 +326,27 @@ pub fn startTrace(self: *Profiler, pq: *ProfileQueue) void {
     // TODO: Find out what we need to bring over. For now, we only target GFX10
     // and the stuff from radv_emit_thread_trace_start.
     std.log.info("starting kernel trace", .{});
-    _ = self;
-    _ = pq;
+    self.submit(pq, pq.thread_trace.start_packet.asHsaPacket());
 }
 
 pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) void {
     std.log.info("stopping kernel trace", .{});
-    _ = self;
-    _ = pq;
+    self.submit(pq, pq.thread_trace.stop_packet.asHsaPacket());
+
+    // Wait until the stop trace packet has been processed.
+    while (true) {
+        const value = self.hsa.signal_wait_scacquire(
+            pq.thread_trace.stop_packet.completion_signal,
+            c.HSA_SIGNAL_CONDITION_LT,
+            1,
+            stop_trace_signal_timeout_ns,
+            c.HSA_WAIT_STATE_BLOCKED,
+        );
+        switch (value) {
+            0 => break,
+            1 => {},
+            else => std.log.err("invalid signal value", .{}),
+        }
+    }
+    self.hsa.signal_store_relaxed(pq.thread_trace.stop_packet.completion_signal, 1);
 }
