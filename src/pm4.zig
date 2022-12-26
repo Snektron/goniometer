@@ -21,14 +21,150 @@ pub const Pkt3Header = packed struct(Word) {
     packet_type: u2 = 0x3,
 };
 
-/// Registers. Note: value is byte offset, not word offset.
-pub const Register = enum(u16) {
-    // TODO: Fill with required values.
-    compute_user_data_0 = 0xB900,
-    compute_static_thread_mgmt_se0 = 0xB858,
+/// SH Registers. Note: value is byte offset, not word offset.
+pub const ShRegister = enum(u16) {
+    pub const base = 0xB000;
 
-    pub fn address(self: Register) u16 {
-        return (@enumToInt(self) - 0xB000) / @sizeOf(u32);
+    compute_thread_trace_enable = 0xB878,
+
+    pub fn address(self: ShRegister) u16 {
+        return (@enumToInt(self) - base) / @sizeOf(u32);
+    }
+
+    pub fn Type(comptime self: ShRegister) type {
+        return switch (self) {
+            .compute_thread_trace_enable => packed struct(u32) {
+                enable: bool,
+                _reserved: u31 = 0,
+            },
+        };
+    }
+};
+
+/// UCONFIG registers. TODO: find out if they need to be merged with the above.
+pub const UConfigRegister = enum(u32) {
+    pub const base = 0x30000;
+
+    grbm_gfx_index = 0x30800,
+
+    pub fn address(self: UConfigRegister) u32 {
+        return (@enumToInt(self) - base) / @sizeOf(u32);
+    }
+
+    pub fn Type(comptime self: UConfigRegister) type {
+        return switch (self) {
+            .grbm_gfx_index => packed struct(u32) {
+                instance_index: u8,
+                sa_index: u8,
+                se_index: u8,
+                _reserved: u5 = 0,
+                sa_broadcast_writes: bool,
+                instance_broadcast_writes: bool,
+                se_broadcast_writes: bool,
+            },
+        };
+    }
+};
+
+pub const PrivilegedRegister = enum(u16) {
+    sqtt_buf0_base = 0x8D00,
+    sqtt_buf0_size = 0x8D04,
+    sqtt_mask = 0x8D14,
+    sqtt_token_mask = 0x8D18,
+    sqtt_ctrl = 0x8D1C,
+    sqtt_wptr = 0x8D10,
+    sqtt_status = 0x8D20,
+    sqtt_dropped_cntr = 0x8D24,
+
+    pub fn address(self: PrivilegedRegister) u32 {
+        return @enumToInt(self) / @sizeOf(u32);
+    }
+
+    pub fn Type(comptime self: PrivilegedRegister) type {
+        return switch (self) {
+            .sqtt_buf0_base => u32,
+            .sqtt_buf0_size => packed struct(u32) {
+                base_hi: u8,
+                size: u24,
+            },
+            .sqtt_mask => packed struct(u32) {
+                simd_sel: u2, // bits 0-2
+                _reserved1: u2 = 0,
+                wgp_sel: u4, // bits 4-8
+                sa_sel: u1, // bit 9
+                wtype_include: u7, // bits 10-17
+                _reserved2: u16 = 0,
+            },
+            .sqtt_token_mask => packed struct(u32) {
+                pub const TokenExclude = packed struct(u12) {
+                    vmemexec: bool = false,
+                    aluexec: bool = false,
+                    valuinst: bool = false,
+                    waverdy: bool = false,
+                    immed1: bool = false,
+                    immediate: bool = false,
+                    reg: bool = false,
+                    event: bool = false,
+                    inst: bool = false,
+                    utilctr: bool = false,
+                    wavealloc: bool = false,
+                    perf: bool = false,
+                };
+
+                pub const RegInclude = packed struct(u8) {
+                    sqdec: bool = false,
+                    shdec: bool = false,
+                    gfxudec: bool = false,
+                    comp: bool = false,
+                    context: bool = false,
+                    config: bool = false,
+                    other: bool = false,
+                    reads: bool = false,
+                };
+
+                token_exclude: TokenExclude,
+                bop_events_token_include: bool,
+                _reserved1: u3 = 0,
+                reg_include: RegInclude,
+                inst_exclude: u3,
+                _resreved2: u1 = 0,
+                reg_exclude: u3,
+                reg_detail_all: u1,
+            },
+            .sqtt_ctrl => packed struct(u32) {
+                mode: u2 = 0,
+                all_vmid: bool = false,
+                ch_perf_en: bool = false,
+                interript_en: bool = false,
+                double_buffer: bool = false,
+                hiwater: u3 = 0,
+                reg_stall_en: bool = false,
+                spi_stall_en: bool = false,
+                sq_stall_en: bool = false,
+                reg_drop_on_stall: bool = false,
+                util_timer: bool = false,
+                wavestart_mode: u2 = 0,
+                rt_freq: u2 = 0,
+                sync_count_markers: bool = false,
+                sync_count_draws: bool = false,
+                lowater_offset: u3 = 0,
+                _reserved1: u5 = 0,
+                auto_flush_padding_dis: bool = false,
+                auto_flush_mode: bool = false,
+                capture_all: bool = false,
+                draw_event_en: bool = false,
+            },
+            .sqtt_status => packed struct(u32) {
+                finish_pending: u12 = 0,
+                finish_done: u12 = 0,
+                utc_err: bool = false,
+                busy: bool = false,
+                event_cntr_overflow: bool = false,
+                event_cntr_stall: bool = false,
+                owner_vmid: u4 = 0,
+            },
+            else => unreachable, // TODO: translate these structure types.
+        };
     }
 };
 
@@ -36,8 +172,7 @@ pub const Register = enum(u16) {
 // engine type. This is the "compute" version.
 pub const IndirectBuffer = packed struct(u96) {
     swap: u2,
-    ib_base_lo: u30,
-    ib_base_hi: u32,
+    ib_base: u62,
     size: u20,
     chain: u1,
     offload_polling: u1,
@@ -46,6 +181,93 @@ pub const IndirectBuffer = packed struct(u96) {
     vmid: u4,
     cache_policy: u2,
     _reserved2: u2 = 0,
+};
+
+pub const CopyData = packed struct(u160) {
+    pub const SrcSel = enum(u4) {
+        mem_mapped_reg = 0,
+        memory = 1,
+        tc_l2 = 2,
+        gds = 3,
+        perf = 4,
+        imm = 5,
+        atomic_rtn = 6,
+        gds_atomic_rtn_0 = 7,
+        gds_atomic_rtn_1 = 8,
+    };
+
+    pub const DstSel = enum(u3) {
+        mem_mapped_reg = 0,
+        memory_sync = 1,
+        tc_l2 = 2,
+        gds = 3,
+        perf = 4,
+        memory_async = 5,
+    };
+
+    const Control = packed struct(u32) {
+        src_sel: SrcSel, // bits 0-3
+        _reserved1: u4 = 0,
+        dst_sel: DstSel, // bits 8-11
+        _reserved2: u5 = 0,
+        count_sel: u1, // bit 16
+        _reserved3: u3 = 0,
+        wr_confirm: bool, // bit 20
+        _reserved4: u9 = 0,
+        engine_sel: u2, // bits 30-31
+    };
+
+    control: Control,
+    src_addr: u64,
+    dst_addr: u64,
+};
+
+pub const EventWrite = packed struct(u96) {
+    pub const EventType = enum(u8) {
+        thread_trace_start = 51,
+        thread_trace_stop = 52,
+        thread_trace_finish = 55,
+        _,
+    };
+
+    event_type: EventType,
+    event_index: u4,
+    _reserved1: u20 = 0,
+    addr: u64,
+};
+
+pub const WaitRegMem = packed struct(u192) {
+    pub const Function = enum(u3) {
+        always = 0b000,
+        lt = 0b001,
+        lte = 0b010,
+        eq = 0b011,
+        ne = 0b100,
+        gte = 0b101,
+        gt = 0b110,
+    };
+
+    pub const MemSpace = enum(u1) {
+        register = 0,
+        memory = 1,
+    };
+
+    pub const Engine = enum(u1) {
+        me = 0,
+        pfp = 1,
+    };
+
+    function: Function,
+    _reserved1: u1 = 0,
+    mem_space: MemSpace,
+    _reserved2: u3 = 0,
+    engine: Engine,
+    _reserved3: u23 = 0,
+    poll_addr: u64,
+    reference: u32,
+    mask: u32,
+    poll_interval: u16,
+    _reserved4: u16 = 0,
 };
 
 // Taken from https://github.com/GPUOpen-Drivers/pal/blob/dev/src/core/hw/gfxip/gfx9/chip/gfx9_plus_merged_pm4_it_opcodes.h

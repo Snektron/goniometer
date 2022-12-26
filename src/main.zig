@@ -74,7 +74,10 @@ fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) vo
         if (packet.header.packet_type == .kernel_dispatch) {
             profiler.startTrace(pq);
             profiler.submit(pq, packet);
-            profiler.stopTrace(pq);
+            profiler.stopTrace(pq) catch |err| switch (err) {
+                // Not fatal, just couldnt save the buffer.
+                error.Save => {},
+            };
         } else {
             profiler.submit(pq, packet);
         }

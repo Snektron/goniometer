@@ -215,7 +215,7 @@ pub const Instance = struct {
         agent: Agent,
         size: u32,
         queue_type: QueueType32,
-        callback: ?*const fn(status: Status, source: *Queue, data: ?*anyopaque) callconv(.C) void, // TODO: wrap
+        callback: ?*const fn (status: Status, source: *Queue, data: ?*anyopaque) callconv(.C) void, // TODO: wrap
         data: ?*anyopaque,
         private_segment_size: u32,
         group_segment_size: u32,
@@ -225,7 +225,7 @@ pub const Instance = struct {
             agent,
             size,
             @enumToInt(queue_type),
-            @ptrCast(?*const fn(Status, [*c]Queue, data: ?*anyopaque) callconv(.C) void, callback),
+            @ptrCast(?*const fn (Status, [*c]Queue, data: ?*anyopaque) callconv(.C) void, callback),
             data,
             private_segment_size,
             group_segment_size,
@@ -327,10 +327,7 @@ pub const Instance = struct {
         };
     }
 
-    pub fn destroySignal(
-        self: *const Instance,
-        signal: Signal
-    ) void {
+    pub fn destroySignal(self: *const Instance, signal: Signal) void {
         switch (self.signal_destroy(signal)) {
             c.HSA_STATUS_SUCCESS => {},
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,

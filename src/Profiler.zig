@@ -2,8 +2,8 @@ const Profiler = @This();
 
 const std = @import("std");
 const hsa = @import("hsa.zig");
+const rgp = @import("rgp.zig");
 const ThreadTrace = @import("ThreadTrace.zig");
-const pm4 = @import("pm4.zig");
 
 const stop_trace_signal_timeout_ns = std.time.ns_per_s * 10;
 
@@ -249,7 +249,7 @@ pub fn startTrace(self: *Profiler, pq: *ProfileQueue) void {
     self.submit(pq, pq.thread_trace.start_packet.asHsaPacket());
 }
 
-pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) void {
+pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) !void {
     std.log.info("stopping kernel trace", .{});
     self.submit(pq, pq.thread_trace.stop_packet.asHsaPacket());
 
@@ -270,4 +270,29 @@ pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) void {
         }
     }
     self.instance.signalStore(pq.thread_trace.stop_packet.completion_signal, 1, .Monotonic);
+
+    rgp.dumpCapture("dump.rgp", &pq.thread_trace) catch |err| {
+        std.log.err("failed to save capture: {s}", .{@errorName(err)});
+        return error.Save;
+    };
+
+    // const trace_offset = for (pq.thread_trace.output_buffer) |b, i| {
+    //     if (b != 0) break i;
+    // } else null;
+
+    // if (trace_offset) |offset| {
+    //     std.log.info("trace buffer data found at index: {}", .{offset});
+    // } else {
+    //     std.log.info("no trace data found :(", .{});
+    // }
+
+    // std.log.debug("first few words:", .{});
+    // for (std.mem.bytesAsSlice(u32, pq.thread_trace.output_buffer)[0..32]) |w| {
+    //     std.log.debug("0x{x}", .{w});
+
+    // }
+    // std.log.debug("...", .{});
+    // for (std.mem.bytesAsSlice(u32, pq.thread_trace.output_buffer)[0x400..][0..32]) |w| {
+    //     std.log.debug("0x{x}", .{w});
+    // }
 }

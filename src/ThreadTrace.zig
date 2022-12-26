@@ -99,14 +99,15 @@ pub fn init(
         cpu_pool,
         threadTraceBufferSize(shader_engines, thread_trace_buffer_size),
     );
+    std.mem.set(u8, output_buffer, 0);
     errdefer instance.memoryPoolFree(output_buffer);
     instance.agentsAllowAccess(output_buffer.ptr, &.{agent});
 
-    const start_ib = try startCommands(instance, cpu_pool);
+    const start_ib = try startCommands(instance, cpu_pool, shader_engines, output_buffer);
     errdefer instance.memoryPoolFree(start_ib);
     instance.agentsAllowAccess(start_ib.ptr, &.{agent});
 
-    const stop_ib = try stopCommands(instance, cpu_pool);
+    const stop_ib = try stopCommands(instance, cpu_pool, shader_engines, output_buffer);
     errdefer instance.memoryPoolFree(stop_ib);
     instance.agentsAllowAccess(stop_ib.ptr, &.{agent});
 
@@ -134,16 +135,226 @@ fn threadTraceBufferSize(shader_engines: u32, per_trace_buffer_size: u32) u32 {
     return @intCast(u32, size);
 }
 
-fn startCommands(instance: *const hsa.Instance, cpu_pool: hsa.MemoryPool) ![]pm4.Word {
+fn threadTraceInfoOffset(shader_engine: u32) usize {
+    return @sizeOf(ThreadTraceInfo) * shader_engine;
+}
+
+fn threadTraceDataOffset(per_trace_buffer_size: u32, shader_engine: u32, shader_engines: u32) usize {
+    var data_offset = std.mem.alignForward(@sizeOf(ThreadTraceInfo) * shader_engines, sqtt_buffer_align);
+    data_offset += std.mem.alignForward(per_trace_buffer_size, sqtt_buffer_align) * shader_engine;
+    return data_offset;
+}
+
+fn startCommands(
+    instance: *const hsa.Instance,
+    cpu_pool: hsa.MemoryPool,
+    shader_engines: u32,
+    output_buffer: []u8,
+) ![]pm4.Word {
+    // Magic values and stuff in this function are all taken from
+    // radv_emit_thread_trace_start.
+
     var cmdbuf = try CmdBuf.alloc(instance, cpu_pool, start_cmd_size);
     errdefer cmdbuf.free(instance);
-    cmdbuf.nop();
+
+    const shifted_size = @shrExact(thread_trace_buffer_size, sqtt_buffer_align_shift);
+    const output_va = @ptrToInt(output_buffer.ptr);
+
+    // TODO: mesa only enables thread trace for shader engines/compute units which are enabled.
+    // We may be able to query that information with hsa_amd_queue_cu_get_mask, but its not
+    // terribly clear on documentation so just skip that for now.
+    // Assume that all shader engines are enabled, and that the first active CU is 0.
+
+    var shader_engine: u32 = 0;
+    while (shader_engine < shader_engines) : (shader_engine += 1) {
+        // Note: this assumes that the device and host VA are the same.
+        // TODO: Is it? We can find out with hsa_amd_pointer_info.
+        const data_va = output_va + threadTraceDataOffset(thread_trace_buffer_size, shader_engine, shader_engines);
+        const shifted_va = @shrExact(data_va, sqtt_buffer_align_shift);
+        const first_active_cu = 0;
+
+        cmdbuf.setUConfigReg(.grbm_gfx_index, .{
+            .instance_index = 0,
+            .sa_index = 0,
+            .se_index = @intCast(u8, shader_engine),
+            .sa_broadcast_writes = false,
+            .instance_broadcast_writes = true,
+            .se_broadcast_writes = false,
+        });
+
+        // Assume gfx >= 10
+        // Note: order is apparently important for the following 2 registers.
+        cmdbuf.setPrivilegedConfigReg(.sqtt_buf0_size, .{
+            .size = @intCast(u24, shifted_size),
+            .base_hi = @intCast(u8, shifted_va >> 32),
+        });
+        cmdbuf.setPrivilegedConfigReg(.sqtt_buf0_base, @truncate(u32, shifted_va));
+
+        cmdbuf.setPrivilegedConfigReg(.sqtt_mask, .{
+            .wtype_include = 0x7F,
+            .sa_sel = 0,
+            .wgp_sel = @intCast(u1, first_active_cu / 2),
+            .simd_sel = 0,
+        });
+
+        cmdbuf.setPrivilegedConfigReg(.sqtt_token_mask, .{
+            .token_exclude = .{
+                .perf = true,
+            },
+            .bop_events_token_include = false,
+            .reg_include = .{
+                .sqdec = true,
+                .shdec = true,
+                .gfxudec = true,
+                .comp = true,
+                .context = true,
+                .config = true,
+            },
+            .inst_exclude = 0,
+            .reg_exclude = 0,
+            .reg_detail_all = 0,
+        });
+
+        cmdbuf.setPrivilegedConfigReg(.sqtt_ctrl, .{
+            .mode = 1,
+            .util_timer = true,
+            .hiwater = 5,
+            .rt_freq = 2,
+            .draw_event_en = true,
+            .reg_stall_en = true,
+            .spi_stall_en = true,
+            .sq_stall_en = true,
+            .reg_drop_on_stall = true,
+            .lowater_offset = 4, // Note: gfx10 specific
+            .auto_flush_mode = true, // Required for a gfx10 specific bug
+        });
+    }
+
+    // Note: In mesa this mentions restoring stuff. Should we read the previous register state
+    // and set it back to whatever it was?
+    cmdbuf.setUConfigReg(.grbm_gfx_index, .{
+        .instance_index = 0,
+        .sa_index = 0,
+        .se_index = 0,
+        .sa_broadcast_writes = true,
+        .instance_broadcast_writes = true,
+        .se_broadcast_writes = true,
+    });
+
+    // HSA queue should be compute, right? Right??
+    cmdbuf.setShReg(.compute_thread_trace_enable, .{
+        .enable = true,
+    });
+
     return cmdbuf.words();
 }
 
-fn stopCommands(instance: *const hsa.Instance, cpu_pool: hsa.MemoryPool) ![]pm4.Word {
+fn stopCommands(
+    instance: *const hsa.Instance,
+    cpu_pool: hsa.MemoryPool,
+    shader_engines: u32,
+    output_buffer: []u8,
+) ![]pm4.Word {
     var cmdbuf = try CmdBuf.alloc(instance, cpu_pool, stop_cmd_size);
     errdefer cmdbuf.free(instance);
-    cmdbuf.nop();
+
+    cmdbuf.setShReg(.compute_thread_trace_enable, .{
+        .enable = false,
+    });
+
+    cmdbuf.writeEventNonSample(.thread_trace_finish, 0);
+
+    var shader_engine: u32 = 0;
+    while (shader_engine < shader_engines) : (shader_engine += 1) {
+        cmdbuf.setUConfigReg(.grbm_gfx_index, .{
+            .instance_index = 0,
+            .sa_index = 0,
+            .se_index = @intCast(u8, shader_engine),
+            .sa_broadcast_writes = false,
+            .instance_broadcast_writes = true,
+            .se_broadcast_writes = false,
+        });
+
+        const sqtt_status = pm4.PrivilegedRegister.sqtt_status;
+        // _ = output_buffer;
+        // _ = sqtt_status;
+
+        // TODO: This hangs, but doesnt seem to prevent anything from appearing in the output...
+        // Poll the status register to ensure that the thread trace has finished writing.
+        // cmdbuf.waitRegMem(.{
+        //     .function = .ne,
+        //     .mem_space = .register,
+        //     .engine = .me,
+        //     .poll_addr = sqtt_status.address(),
+        //     .reference = 0,
+        //     .mask = @bitCast(u32, sqtt_status.Type(){
+        //         .finish_done = std.math.maxInt(u12),
+        //     }),
+        //     .poll_interval = 4,
+        // });
+
+        // Stop tracing
+        cmdbuf.setPrivilegedConfigReg(.sqtt_ctrl, .{
+            .mode = 0,
+            .util_timer = true,
+            .hiwater = 5,
+            .rt_freq = 2,
+            .draw_event_en = true,
+            .reg_stall_en = true,
+            .spi_stall_en = true,
+            .sq_stall_en = true,
+            .reg_drop_on_stall = true,
+            .lowater_offset = 4, // Note: gfx10 specific
+            .auto_flush_mode = true, // Required for a gfx10 specific bug
+        });
+
+        // And wait for the trace to be completely finished.
+        cmdbuf.waitRegMem(.{
+            .function = .eq,
+            .mem_space = .register,
+            .engine = .me,
+            .poll_addr = sqtt_status.address(),
+            .reference = 0,
+            .mask = @bitCast(u32, sqtt_status.Type(){
+                .busy = true,
+            }),
+            .poll_interval = 4,
+        });
+
+        // Copy back the info structure.
+        const info_regs = [_]pm4.PrivilegedRegister{
+            .sqtt_wptr,
+            .sqtt_status,
+            .sqtt_dropped_cntr,
+        };
+
+        // Assumes again that the gpu and cpu pointers match.
+        const va = @ptrToInt(output_buffer.ptr);
+        const info_va = va + threadTraceInfoOffset(shader_engine);
+
+        for (info_regs) |reg, i| {
+            cmdbuf.copyData(.{
+                .control = .{
+                    .src_sel = .perf,
+                    .dst_sel = .tc_l2,
+                    .count_sel = 0,
+                    .wr_confirm = true,
+                    .engine_sel = 0,
+                },
+                .src_addr = reg.address(),
+                .dst_addr = info_va + i * @sizeOf(pm4.Word),
+            });
+        }
+    }
+
+    cmdbuf.setUConfigReg(.grbm_gfx_index, .{
+        .instance_index = 0,
+        .sa_index = 0,
+        .se_index = 0,
+        .sa_broadcast_writes = true,
+        .instance_broadcast_writes = true,
+        .se_broadcast_writes = true,
+    });
+
     return cmdbuf.words();
 }

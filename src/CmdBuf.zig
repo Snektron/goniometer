@@ -75,21 +75,66 @@ fn pkt3(self: *Self, opcode: pm4.Opcode, opts: Pkt3Options, data: []const u32) v
     self.emit(data);
 }
 
-pub fn setShReg(self: *Self, reg: pm4.Register, value: u32) void {
-    self.setShRegs(reg, &.{value});
+pub fn setShReg(self: *Self, comptime reg: pm4.ShRegister, value: reg.Type()) void {
+    self.setShRegs(reg, &.{@bitCast(u32, value)});
 }
 
-pub fn setShRegs(self: *Self, start_reg: pm4.Register, values: []const u32) void {
+pub fn setShRegs(self: *Self, start_reg: pm4.ShRegister, values: []const u32) void {
     self.pkt3Header(.set_sh_reg, .{}, values.len + 1);
     self.emit(&.{start_reg.address()});
     self.emit(values);
 }
 
+pub fn setUConfigReg(self: *Self, comptime reg: pm4.UConfigRegister, value: reg.Type()) void {
+    self.setUConfigRegs(reg, &.{@bitCast(u32, value)});
+}
+
+pub fn setUConfigRegs(self: *Self, start_reg: pm4.UConfigRegister, values: []const u32) void {
+    self.pkt3Header(.set_uconfig_reg, .{}, values.len + 1);
+    self.emit(&.{start_reg.address()});
+    self.emit(values);
+}
+
+pub fn setPrivilegedConfigReg(self: *Self, comptime reg: pm4.PrivilegedRegister, value: reg.Type()) void {
+    self.copyData(.{
+        .control = .{
+            .src_sel = .imm,
+            .dst_sel = .perf,
+            .count_sel = 0,
+            .wr_confirm = false,
+            .engine_sel = 0,
+        },
+        .src_addr = @bitCast(u32, value),
+        .dst_addr = reg.address(),
+    });
+}
+
+pub fn writeEventNonSample(self: *Self, event_type: pm4.EventWrite.EventType, index: u4) void {
+    const event_write = pm4.EventWrite{
+        .event_type = event_type,
+        .event_index = index,
+        .addr = 0,
+    };
+    // Non-sample events dont need the extra address, apparently.
+    // This makes the difference between a hang or not.
+    self.pkt3(.event_write, .{}, asWords(&event_write)[0..1]);
+}
+
+pub fn copyData(self: *Self, copy_data: pm4.CopyData) void {
+    self.pkt3(.copy_data, .{}, asWords(&copy_data));
+}
+
+pub fn waitRegMem(
+    self: *Self,
+    wait_reg_mem: pm4.WaitRegMem,
+) void {
+    self.pkt3(.wait_reg_mem, .{}, asWords(&wait_reg_mem));
+}
+
 pub fn indirectBuffer(self: *Self, buf: []const pm4.Word) void {
     const ib = pm4.IndirectBuffer{
         .swap = 0,
-        .ib_base_lo = @truncate(u30, @ptrToInt(buf.ptr) >> 2),
-        .ib_base_hi = @truncate(u32, @ptrToInt(buf.ptr) >> 32),
+        .ib_base = @truncate(u62, @ptrToInt(buf.ptr) >> 2),
         .size = @intCast(u20, buf.len),
         .chain = 0,
         .offload_polling = 0,
