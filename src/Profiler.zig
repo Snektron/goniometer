@@ -1,8 +1,7 @@
 const Profiler = @This();
 
 const std = @import("std");
-const c = @import("c.zig");
-const hsa_util = @import("hsa_util.zig");
+const hsa = @import("hsa.zig");
 const ThreadTrace = @import("ThreadTrace.zig");
 const pm4 = @import("pm4.zig");
 
@@ -11,11 +10,11 @@ const stop_trace_signal_timeout_ns = std.time.ns_per_s * 10;
 /// A proxy HSA queue that we can use to intercept HSA packets.
 pub const ProfileQueue = struct {
     /// The agent that created this queue
-    agent: c.hsa_agent_t,
+    agent: hsa.Agent,
     /// The real queue that commands will be submitted to.
-    backing_queue: *c.hsa_queue_t,
+    backing_queue: *hsa.Queue,
     /// The HSA handle for this proxying queue.
-    queue: c.hsa_queue_t,
+    queue: hsa.Queue,
     /// The read index for the queue's ring buffer.
     read_index: u64,
     /// The write index for the queue's ring buffer.
@@ -23,232 +22,153 @@ pub const ProfileQueue = struct {
     /// Thread trace data.
     thread_trace: ThreadTrace,
 
-    pub fn packetBuffer(self: *ProfileQueue) []c.hsa_packet_t {
+    pub fn packetBuffer(self: *ProfileQueue) []hsa.Packet {
         return @ptrCast(
-            [*]c.hsa_packet_t,
-            @alignCast(c.hsa_packet_t.alignment, self.queue.base_address.?),
+            [*]hsa.Packet,
+            @alignCast(hsa.Packet.alignment, self.queue.base_address.?),
         )[0..self.queue.size];
     }
 
-    fn backingPacketBuffer(self: *ProfileQueue) []c.hsa_packet_t {
-        return @ptrCast([*]c.hsa_packet_t, @alignCast(c.hsa_packet_t.alignment, self.backing_queue.base_address.?))[0..self.backing_queue.size];
+    fn backingPacketBuffer(self: *ProfileQueue) []hsa.Packet {
+        return @ptrCast(
+            [*]hsa.Packet,
+            @alignCast(hsa.Packet.alignment, self.backing_queue.base_address.?),
+        )[0..self.backing_queue.size];
     }
 };
 
 /// Meta-information tho avoid having it to query all the time.
 pub const AgentInfo = struct {
-    /// The type of this agent
-    agent_type: c.hsa_device_type_t,
+    /// The type of the agent. Thread traces will only be valid for queues created for a gpu agent.
+    agent_type: hsa.DeviceType,
     /// The primary (device-local) pool to allocate memory from for this agent.
-    primary_pool: c.hsa_amd_memory_pool_t,
-    /// The number of shader engines in this agent. Only valid if
-    /// `agent_type` is GPU.
-    shader_engines: ?u32,
+    primary_pool: hsa.MemoryPool,
 };
 
 /// The allocator to use for profiling data.
 a: std.mem.Allocator,
-/// The api table that we can use to invoke HSA functions.
-hsa: c.CoreApiTable,
-/// The api table for the AMD extension functionality.
-hsa_amd: c.AmdExtTable,
-/// Dynamically loaded libhsa-amd-aqlprofile.
-aqlprofile: struct {
-    lib: std.DynLib,
-    start: *const @TypeOf(c.hsa_ven_amd_aqlprofile_start),
-},
+/// The HSA instance that we call into.
+instance: hsa.Instance,
 /// A map of agents and some useful information about them.
-agents: std.AutoArrayHashMapUnmanaged(c.hsa_agent_t, AgentInfo) = .{},
+agents: std.AutoArrayHashMapUnmanaged(hsa.Agent, AgentInfo) = .{},
 /// The CPU agent that we use to allocate host resources, such as CPU-GPU
 /// shared memory etc. Index into `agents`.
 cpu_agent: u32,
 /// A map of queue handles to queue proxy queues. A queue is identified by its doorbell signal.
 /// TODO: we can get rid of the duplicate signal handle by using a context.
-queues: std.AutoArrayHashMapUnmanaged(c.hsa_signal_t, *ProfileQueue) = .{},
+queues: std.AutoArrayHashMapUnmanaged(hsa.Signal, *ProfileQueue) = .{},
 
-pub fn init(a: std.mem.Allocator, hsa: *c.ApiTable) !Profiler {
+pub fn init(a: std.mem.Allocator, api_table: *const hsa.ApiTable) !Profiler {
     var self = Profiler{
         .a = a,
-        .hsa = hsa.core.*,
-        .hsa_amd = hsa.amd_ext.*,
-        .aqlprofile = undefined,
+        .instance = hsa.Instance.init(api_table),
         .cpu_agent = undefined,
     };
-    self.aqlprofile.lib = std.DynLib.open(&c.kAqlProfileLib) catch |err| {
-        std.log.err("failed to load aqlprofile library {s}: {s}", .{ &c.kAqlProfileLib, @errorName(err) });
-        return error.AqlProfileLoadFailure;
-    };
-    errdefer self.aqlprofile.lib.close();
-
-    self.aqlprofile.start = self.aqlprofile.lib.lookup(
-        *const @TypeOf(c.hsa_ven_amd_aqlprofile_start),
-        "hsa_ven_amd_aqlprofile_start",
-    ) orelse return error.AqlProfileMissingLibraryFunction;
-
     try self.queryAgents();
-
     return self;
 }
 
 pub fn deinit(self: *Profiler) void {
-    self.aqlprofile.lib.close();
+    self.agents.deinit(self.a);
+    self.queues.deinit(self.a);
     self.* = undefined;
 }
 
 fn queryAgents(self: *Profiler) !void {
-    const status = self.hsa.iterate_agents(&queryAgentsCbk, self);
-    if (status != c.HSA_STATUS_SUCCESS) {
-        return error.HsaError;
-    }
+    _ = try self.instance.iterateAgents(self, queryAgentsCbk);
 
     for (self.agents.keys()) |agent, i| {
-        var name_buf: [64]u8 = undefined;
-        try hsa_util.check(self.hsa.agent_get_info(agent, c.HSA_AGENT_INFO_NAME, &name_buf));
+        const name_buf = self.instance.getAgentInfo(agent, .name);
         const name = std.mem.sliceTo(&name_buf, 0);
 
-        var agent_type: c.hsa_device_type_t = undefined;
-        try hsa_util.check(self.hsa.agent_get_info(agent, c.HSA_AGENT_INFO_DEVICE, &agent_type));
-
+        const agent_type = self.instance.getAgentInfo(agent, .device_type);
         const type_str = switch (agent_type) {
-            c.HSA_DEVICE_TYPE_CPU => "cpu",
-            c.HSA_DEVICE_TYPE_GPU => "gpu",
-            else => "other",
+            .cpu => "cpu",
+            .gpu => "gpu",
+            _ => "other",
         };
 
-        std.log.info("system has agent '{s}' of type {s}", .{ name, type_str });
+        std.log.info("found device '{s}' of type {s}", .{ name, type_str });
 
-        var maybe_shader_engines: ?u32 = null;
         switch (agent_type) {
-            c.HSA_DEVICE_TYPE_CPU => {
+            .cpu => {
                 self.cpu_agent = @intCast(u32, i);
-            },
-            c.HSA_DEVICE_TYPE_GPU => {
-                var shader_engines: u32 = undefined;
-                try hsa_util.check(self.hsa.agent_get_info(agent, c.HSA_AMD_AGENT_INFO_NUM_SHADER_ENGINES, &shader_engines));
-                maybe_shader_engines = shader_engines;
             },
             else => {},
         }
 
-        var ctx = QueryAgentPoolsCtx{
-            .profiler = self,
-            .agent = agent,
-            .primary_pool = undefined,
+        const pool = (try self.instance.iterateMemoryPools(agent, self, queryAgentPoolsCbk)) orelse {
+            std.log.err("failed to find a suitable primary memory pool for agent {} ({s})", .{ agent.handle, name });
+            return error.Generic;
         };
-        switch (c.hsa_amd_agent_iterate_memory_pools(agent, QueryAgentPoolsCtx.cbk, &ctx)) {
-            c.HSA_STATUS_INFO_BREAK => {},
-            // Success but no break means no pool found.
-            c.HSA_STATUS_SUCCESS => {
-                std.log.err("failed to find a suitable primary memory pool for agent {} ({s})", .{ agent.handle, name });
-                return error.Generic;
-            },
-            else => |e| try hsa_util.check(e),
-        }
 
         self.agents.values()[i] = .{
             .agent_type = agent_type,
-            .primary_pool = ctx.primary_pool,
-            .shader_engines = maybe_shader_engines,
+            .primary_pool = pool,
         };
     }
 }
 
-const QueryAgentPoolsCtx = struct {
-    profiler: *Profiler,
-    agent: c.hsa_agent_t,
-    primary_pool: c.hsa_amd_memory_pool_t,
+fn queryAgentsCbk(self: *Profiler, agent: hsa.Agent) !?void {
+    _ = self.agents.getOrPut(self.a, agent) catch return error.OutOfResources;
+    return null;
+}
 
-    fn cbk(pool: c.hsa_amd_memory_pool_t, data: ?*anyopaque) callconv(.C) c.hsa_status_t {
-        const ctx = @ptrCast(*QueryAgentPoolsCtx, @alignCast(@alignOf(QueryAgentPoolsCtx), data.?));
+fn queryAgentPoolsCbk(self: *Profiler, pool: hsa.MemoryPool) !?hsa.MemoryPool {
+    const segment = self.instance.getMemoryPoolInfo(pool, .segment);
+    if (segment != .global)
+        return null;
 
-        var segment: c.hsa_amd_segment_t = undefined;
-        switch (ctx.profiler.hsa_amd.memory_pool_get_info(
-            pool,
-            c.HSA_AMD_MEMORY_POOL_INFO_SEGMENT,
-            &segment,
-        )) {
-            c.HSA_STATUS_SUCCESS => {},
-            else => |err| return err,
-        }
+    const runtime_alloc_allowed = self.instance.getMemoryPoolInfo(pool, .runtime_alloc_allowed);
+    if (!runtime_alloc_allowed)
+        return null;
 
-        if (segment != c.HSA_AMD_SEGMENT_GLOBAL)
-            return c.HSA_STATUS_SUCCESS;
-
-        var runtime_alloc_allowed: bool = undefined;
-        switch (ctx.profiler.hsa_amd.memory_pool_get_info(
-            pool,
-            c.HSA_AMD_MEMORY_POOL_INFO_RUNTIME_ALLOC_ALLOWED,
-            &runtime_alloc_allowed,
-        )) {
-            c.HSA_STATUS_SUCCESS => {},
-            else => |err| return err,
-        }
-        if (!runtime_alloc_allowed)
-            return c.HSA_STATUS_SUCCESS;
-
-        ctx.primary_pool = pool;
-        return c.HSA_STATUS_INFO_BREAK;
-    }
-};
-
-fn queryAgentsCbk(agent: c.hsa_agent_t, data: ?*anyopaque) callconv(.C) c.hsa_status_t {
-    const self = @ptrCast(*Profiler, @alignCast(@alignOf(Profiler), data.?));
-    _ = self.agents.getOrPut(self.a, agent) catch |err| {
-        return hsa_util.toStatus(err);
-    };
-    return c.HSA_STATUS_SUCCESS;
+    return pool;
 }
 
 /// Add tracking information for a HSA queue, after it has been created.
 pub fn createQueue(
     self: *Profiler,
-    agent: c.hsa_agent_t,
+    agent: hsa.Agent,
     size: u32,
-    queue_type: c.hsa_queue_type32_t,
-    callback: ?*const fn (c.hsa_status_t, [*c]c.hsa_queue_t, ?*anyopaque) callconv(.C) void,
+    queue_type: hsa.QueueType32,
+    callback: ?*const fn (hsa.Status, [*c]hsa.Queue, ?*anyopaque) callconv(.C) void,
     data: ?*anyopaque,
     private_segment_size: u32,
     group_segment_size: u32,
-) !*c.hsa_queue_t {
+) !*hsa.Queue {
     _ = queue_type;
     _ = callback;
     _ = data;
     _ = private_segment_size;
     _ = group_segment_size;
 
-    var backing_queue: [*c]c.hsa_queue_t = undefined;
-    try hsa_util.check(self.hsa.queue_create(
+    const backing_queue = try self.instance.createQueue(
         agent,
         size,
-        c.HSA_QUEUE_TYPE_MULTI,
+        .multi,
         null, // This is what rocprof does. Maybe this needs to be properly converted?
         null, // This is what rocprof does.
         std.math.maxInt(u32), // This is what rocprof does.
         std.math.maxInt(u32), // This is what rocprof does.
-        &backing_queue,
-    ));
-    errdefer _ = self.hsa.queue_destroy(backing_queue);
+    );
+    errdefer self.instance.destroyQueue(backing_queue);
 
     // Create our own packet buffer, doorbell, etc.
-    var doorbell: c.hsa_signal_t = undefined;
-    try hsa_util.check(self.hsa.signal_create(1, 0, null, &doorbell));
-    errdefer _ = self.hsa.signal_destroy(doorbell);
+    const doorbell = try self.instance.createSignal(1, &.{});
+    errdefer self.instance.destroySignal(doorbell);
 
-    const packet_buf = try self.a.allocWithOptions(c.hsa_packet_t, size, c.hsa_packet_t.alignment, null);
+    const packet_buf = try self.a.allocWithOptions(hsa.Packet, size, hsa.Packet.alignment, null);
     errdefer self.a.free(packet_buf);
 
     // Allocate the thread trace in GPU-accessible host memory.
     const cpu_agent_info = self.agents.values()[self.cpu_agent];
-    const agent_info = self.agents.get(agent).?;
-
     var thread_trace = try ThreadTrace.init(
-        &self.hsa,
-        &self.hsa_amd,
+        &self.instance,
         cpu_agent_info.primary_pool,
         agent,
-        agent_info,
     );
-    errdefer thread_trace.deinit(&self.hsa, &self.hsa_amd);
+    errdefer thread_trace.deinit(&self.instance);
 
     const pq = try self.a.create(ProfileQueue); // Needs to be pinned in memory.
     pq.* = ProfileQueue{
@@ -278,24 +198,24 @@ pub fn createQueue(
 }
 
 /// Remove tracking information for a HSA queue, after it has been destroyed.
-pub fn destroyQueue(self: *Profiler, queue: *c.hsa_queue_t) !void {
+pub fn destroyQueue(self: *Profiler, queue: *hsa.Queue) !void {
     const pq = self.getProfileQueue(queue) orelse return error.InvalidQueue;
-    std.debug.assert(self.hsa.queue_destroy(pq.backing_queue) == c.HSA_STATUS_SUCCESS);
-    std.debug.assert(self.hsa.signal_destroy(pq.queue.doorbell_signal) == c.HSA_STATUS_SUCCESS);
-    pq.thread_trace.deinit(&self.hsa, &self.hsa_amd);
+    pq.thread_trace.deinit(&self.instance);
+    self.instance.destroyQueue(pq.backing_queue);
+    self.instance.destroySignal(pq.queue.doorbell_signal);
     self.a.free(pq.packetBuffer());
     self.a.destroy(pq);
 }
 
 /// Submit a generic packet to the backing queue of a ProfileQueue. This function may block until
 /// there is enough room for the packet.
-pub fn submit(self: *Profiler, pq: *ProfileQueue, packet: *const c.hsa_packet_t) void {
+pub fn submit(self: *Profiler, pq: *ProfileQueue, packet: *const hsa.Packet) void {
     const queue = pq.backing_queue;
-    const write_index = self.hsa.queue_add_write_index_scacq_screl(queue, 1);
+    const write_index = self.instance.queueAddWriteIndex(queue, 1, .AcqRel);
 
     // Busy loop until there is space.
     // TODO: Maybe this can be improved or something?
-    while (write_index - self.hsa.queue_load_read_index_relaxed(queue) >= queue.size) {
+    while (write_index - self.instance.queueLoadReadIndex(queue, .Monotonic) >= queue.size) {
         continue;
     }
 
@@ -309,14 +229,14 @@ pub fn submit(self: *Profiler, pq: *ProfileQueue, packet: *const c.hsa_packet_t)
     const slot_bytes = std.mem.asBytes(slot);
     std.mem.copy(u8, slot_bytes[2..], packet_bytes[2..]);
     // Write the packet header atomically.
-    @atomicStore(u16, &slot.header, packet.header, .Release);
+    @atomicStore(u16, @ptrCast(*u16, &slot.header), @bitCast(u16, packet.header), .Release);
 
     // Finally, ring the doorbell to notify the agent of the updated packet.
-    self.hsa.signal_store_relaxed(queue.doorbell_signal, @intCast(i64, write_index));
+    self.instance.signalStore(queue.doorbell_signal, @intCast(hsa.SignalValue, write_index), .Monotonic);
 }
 
 /// Turn an HSA queue handle into its associated ProfileQueue, if that exists.
-pub fn getProfileQueue(self: *Profiler, queue: *const c.hsa_queue_t) ?*ProfileQueue {
+pub fn getProfileQueue(self: *Profiler, queue: *const hsa.Queue) ?*ProfileQueue {
     return self.queues.get(queue.doorbell_signal);
 }
 
@@ -335,12 +255,13 @@ pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) void {
 
     // Wait until the stop trace packet has been processed.
     while (true) {
-        const value = self.hsa.signal_wait_scacquire(
+        const value = self.instance.signalWait(
             pq.thread_trace.stop_packet.completion_signal,
-            c.HSA_SIGNAL_CONDITION_LT,
+            .lt,
             1,
             stop_trace_signal_timeout_ns,
-            c.HSA_WAIT_STATE_BLOCKED,
+            .blocked,
+            .Acquire,
         );
         switch (value) {
             0 => break,
@@ -348,5 +269,5 @@ pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) void {
             else => std.log.err("invalid signal value", .{}),
         }
     }
-    self.hsa.signal_store_relaxed(pq.thread_trace.stop_packet.completion_signal, 1);
+    self.instance.signalStore(pq.thread_trace.stop_packet.completion_signal, 1, .Monotonic);
 }

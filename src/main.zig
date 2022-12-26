@@ -1,6 +1,5 @@
 const std = @import("std");
-const c = @import("c.zig");
-const hsa_util = @import("hsa_util.zig");
+const hsa = @import("hsa.zig");
 const Profiler = @import("Profiler.zig");
 
 /// The current log level for profiler log messages.
@@ -24,43 +23,43 @@ pub fn log(
 }
 
 fn queueCreate(
-    agent: c.hsa_agent_t,
+    agent: hsa.Agent,
     size: u32,
-    queue_type: c.hsa_queue_type32_t,
-    callback: ?*const fn (c.hsa_status_t, [*c]c.hsa_queue_t, ?*anyopaque) callconv(.C) void,
+    queue_type: u32,
+    callback: ?*const fn (hsa.Status, [*c]hsa.Queue, ?*anyopaque) callconv(.C) void,
     data: ?*anyopaque,
     private_segment_size: u32,
     group_segment_size: u32,
-    queue: [*c][*c]c.hsa_queue_t,
-) callconv(.C) c.hsa_status_t {
+    queue: [*c][*c]hsa.Queue,
+) callconv(.C) hsa.Status {
     queue.* = profiler.createQueue(
         agent,
         size,
-        queue_type,
+        @intToEnum(hsa.QueueType32, queue_type),
         callback,
         data,
         private_segment_size,
         group_segment_size,
     ) catch |err| {
         std.log.err("failed to wrap HSA queue: {s}", .{@errorName(err)});
-        return hsa_util.toStatus(err);
+        return hsa.toStatus(err);
     };
 
-    return c.HSA_STATUS_SUCCESS;
+    return hsa.c.HSA_STATUS_SUCCESS;
 }
 
-fn queueDestroy(queue: [*c]c.hsa_queue_t) callconv(.C) c.hsa_status_t {
+fn queueDestroy(queue: [*c]hsa.Queue) callconv(.C) hsa.Status {
     // TODO: Thread safety
     profiler.destroyQueue(queue) catch |err| switch (err) {
         error.InvalidQueue => std.log.err("application tried to destroy an invalid queue", .{}),
     };
-    return c.HSA_STATUS_SUCCESS;
+    return hsa.c.HSA_STATUS_SUCCESS;
 }
 
-fn signalStore(signal: c.hsa_signal_t, queue_index: c.hsa_signal_value_t) callconv(.C) void {
+fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) void {
     const pq = profiler.queues.get(signal) orelse {
         // No such queue, so this is probably a signal for something else.
-        profiler.hsa.signal_store_relaxed(signal, queue_index);
+        profiler.instance.signal_store_relaxed(signal, queue_index);
         return;
     };
 
@@ -72,7 +71,7 @@ fn signalStore(signal: c.hsa_signal_t, queue_index: c.hsa_signal_value_t) callco
     while (i < end) : (i += 1) {
         const index = i % pq.queue.size;
         const packet = &packet_buf[index];
-        if (packet.packetType() == c.HSA_PACKET_TYPE_KERNEL_DISPATCH) {
+        if (packet.header.packet_type == .kernel_dispatch) {
             profiler.startTrace(pq);
             profiler.submit(pq, packet);
             profiler.stopTrace(pq);
@@ -82,40 +81,40 @@ fn signalStore(signal: c.hsa_signal_t, queue_index: c.hsa_signal_value_t) callco
     }
 }
 
-fn loadQueueReadIndex(queue: [*c]const c.hsa_queue_t) callconv(.C) u64 {
+fn loadQueueReadIndex(queue: [*c]const hsa.Queue) callconv(.C) u64 {
     if (profiler.getProfileQueue(queue)) |pq| {
         return @atomicLoad(u64, &pq.read_index, .Monotonic);
     } else {
-        return profiler.hsa.queue_load_read_index_relaxed(queue);
+        return profiler.instance.queue_load_read_index_relaxed(queue);
     }
 }
 
-fn loadQueueWriteIndex(queue: [*c]const c.hsa_queue_t) callconv(.C) u64 {
+fn loadQueueWriteIndex(queue: [*c]const hsa.Queue) callconv(.C) u64 {
     if (profiler.getProfileQueue(queue)) |pq| {
         return @atomicLoad(u64, &pq.write_index, .Monotonic);
     } else {
-        return profiler.hsa.queue_load_write_index_relaxed(queue);
+        return profiler.instance.queue_load_write_index_relaxed(queue);
     }
 }
 
-fn storeQueueWriteIndex(queue: [*c]const c.hsa_queue_t, value: u64) callconv(.C) void {
+fn storeQueueWriteIndex(queue: [*c]const hsa.Queue, value: u64) callconv(.C) void {
     if (profiler.getProfileQueue(queue)) |pq| {
         @atomicStore(u64, &pq.write_index, value, .Monotonic);
     } else {
-        profiler.hsa.queue_store_write_index_relaxed(queue, value);
+        profiler.instance.queue_store_write_index_relaxed(queue, value);
     }
 }
 
-fn addQueueWriteIndex(queue: [*c]const c.hsa_queue_t, value: u64) callconv(.C) u64 {
+fn addQueueWriteIndex(queue: [*c]const hsa.Queue, value: u64) callconv(.C) u64 {
     if (profiler.getProfileQueue(queue)) |pq| {
         return @atomicRmw(u64, &pq.write_index, .Add, value, .Monotonic);
     } else {
-        return profiler.hsa.queue_add_write_index_relaxed(queue, value);
+        return profiler.instance.queue_add_write_index_relaxed(queue, value);
     }
 }
 
 export fn OnLoad(
-    table: *c.ApiTable,
+    table: *hsa.ApiTable,
     runtime_version: u64,
     failed_tool_count: u64,
     failed_tool_names: [*]const [*:0]const u8,

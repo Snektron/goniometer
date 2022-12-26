@@ -2,9 +2,8 @@
 const Self = @This();
 
 const std = @import("std");
-const c = @import("c.zig");
 const pm4 = @import("pm4.zig");
-const hsa_util = @import("hsa_util.zig");
+const hsa = @import("hsa.zig");
 
 pub const Pkt3Options = struct {
     predicate: bool = false,
@@ -18,16 +17,16 @@ cap: u32,
 /// Pointer the to command buffer's data.
 buf: [*]pm4.Word,
 
-pub fn alloc(hsa_amd: *const c.AmdExtTable, pool: c.hsa_amd_memory_pool_t, cap: u32) !Self {
-    const buf = try hsa_util.alloc(hsa_amd, pool, cap * @sizeOf(pm4.Word));
+pub fn alloc(instance: *const hsa.Instance, pool: hsa.MemoryPool, cap: u32) !Self {
+    const buf = try instance.memoryPoolAllocate(pm4.Word, pool, cap);
     return Self{
         .cap = cap,
-        .buf = @ptrCast([*]pm4.Word, @alignCast(@alignOf(pm4.Word), buf.ptr)),
+        .buf = buf.ptr,
     };
 }
 
-pub fn free(self: *Self, hsa_amd: *const c.AmdExtTable) void {
-    hsa_util.free(hsa_amd, self.buf);
+pub fn free(self: *Self, instance: *const hsa.Instance) void {
+    instance.memoryPoolFree(self.buf);
     self.* = undefined;
 }
 

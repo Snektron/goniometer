@@ -2,9 +2,8 @@
 const Self = @This();
 
 const std = @import("std");
-const c = @import("c.zig");
 const pm4 = @import("pm4.zig");
-const hsa_util = @import("hsa_util.zig");
+const hsa = @import("hsa.zig");
 const CmdBuf = @import("CmdBuf.zig");
 const AgentInfo = @import("Profiler.zig").AgentInfo;
 
@@ -36,13 +35,13 @@ const ThreadTraceInfo = extern struct {
 /// but just a bit touched up for us to use.
 pub const Packet = extern struct {
     comptime {
-        std.debug.assert(@sizeOf(Packet) == c.hsa_packet_t.alignment);
+        std.debug.assert(@sizeOf(Packet) == hsa.Packet.alignment);
     }
 
     const pm4_size = 13;
 
     /// HSA packet header, set to 0 for vendor-specific packet.
-    header: u16,
+    header: hsa.Packet.Header,
     /// Not sure yet if this is really the number of pm4 packets, but when the
     /// indirect buffer command is there this is set to 1 and if there is no command
     /// there it is set to 0.
@@ -53,11 +52,16 @@ pub const Packet = extern struct {
     /// able to have more commands.
     pm4: [pm4_size]pm4.Word,
     /// Signal that probably gets ringed if this packet has been finished executing or something.
-    completion_signal: c.hsa_signal_t,
+    completion_signal: hsa.Signal,
 
     fn init(ib: []const pm4.Word) Packet {
         var packet = Packet{
-            .header = 0,
+            .header = .{
+                .packet_type = .vendor_specific,
+                .barrier = 0,
+                .acquire_fence_scope = 0,
+                .release_fence_scope = 0,
+            },
             .pm4 = .{0} ** pm4_size,
             .completion_signal = .{ .handle = 0 },
         };
@@ -71,14 +75,8 @@ pub const Packet = extern struct {
         return packet;
     }
 
-    fn initWithSignal(hsa: *const c.CoreApiTable, ib: []const pm4.Word) !Packet {
-        var self = Packet.init(ib);
-        try hsa_util.check(hsa.signal_create(1, 0, null, &self.completion_signal));
-        return self;
-    }
-
-    pub fn asHsaPacket(self: *const Packet) *const c.hsa_packet_t {
-        return @ptrCast(*const c.hsa_packet_t, self);
+    pub fn asHsaPacket(self: *const Packet) *const hsa.Packet {
+        return @ptrCast(*const hsa.Packet, self);
     }
 };
 
@@ -91,39 +89,41 @@ stop_ib: []pm4.Word,
 stop_packet: Packet,
 
 pub fn init(
-    hsa: *const c.CoreApiTable,
-    hsa_amd: *const c.AmdExtTable,
-    cpu_pool: c.hsa_amd_memory_pool_t,
-    agent: c.hsa_agent_t,
-    agent_info: AgentInfo,
+    instance: *const hsa.Instance,
+    cpu_pool: hsa.MemoryPool,
+    agent: hsa.Agent,
 ) !Self {
-    const output_buffer = try hsa_util.alloc(
-        hsa_amd,
+    const shader_engines = instance.getAgentInfo(agent, .num_shader_engines);
+    const output_buffer = try instance.memoryPoolAllocate(
+        u8,
         cpu_pool,
-        threadTraceBufferSize(agent_info.shader_engines orelse 1, thread_trace_buffer_size),
+        threadTraceBufferSize(shader_engines, thread_trace_buffer_size),
     );
-    errdefer hsa_util.free(hsa_amd, output_buffer);
-    try hsa_util.allowAccess(hsa_amd, output_buffer.ptr, &.{agent});
+    errdefer instance.memoryPoolFree(output_buffer);
+    instance.agentsAllowAccess(output_buffer.ptr, &.{agent});
 
-    const start_ib = try startCommands(hsa_amd, cpu_pool);
-    try hsa_util.allowAccess(hsa_amd, start_ib.ptr, &.{agent});
+    const start_ib = try startCommands(instance, cpu_pool);
+    errdefer instance.memoryPoolFree(start_ib);
+    instance.agentsAllowAccess(start_ib.ptr, &.{agent});
 
-    const stop_ib = try stopCommands(hsa_amd, cpu_pool);
-    try hsa_util.allowAccess(hsa_amd, stop_ib.ptr, &.{agent});
+    const stop_ib = try stopCommands(instance, cpu_pool);
+    errdefer instance.memoryPoolFree(stop_ib);
+    instance.agentsAllowAccess(stop_ib.ptr, &.{agent});
 
     var self = Self{
         .output_buffer = output_buffer,
         .start_ib = start_ib,
         .start_packet = Packet.init(start_ib),
         .stop_ib = stop_ib,
-        .stop_packet = try Packet.initWithSignal(hsa, stop_ib),
+        .stop_packet = Packet.init(stop_ib),
     };
+    self.stop_packet.completion_signal = try instance.createSignal(1, &.{});
     return self;
 }
 
-pub fn deinit(self: *Self, hsa: *const c.CoreApiTable, hsa_amd: *const c.AmdExtTable) void {
-    hsa_util.free(hsa_amd, self.output_buffer);
-    std.debug.assert(hsa.signal_destroy(self.stop_packet.completion_signal) == c.HSA_STATUS_SUCCESS);
+pub fn deinit(self: *Self, instance: *const hsa.Instance) void {
+    instance.memoryPoolFree(self.output_buffer.ptr);
+    instance.destroySignal(self.stop_packet.completion_signal);
     self.* = undefined;
 }
 
@@ -134,16 +134,16 @@ fn threadTraceBufferSize(shader_engines: u32, per_trace_buffer_size: u32) u32 {
     return @intCast(u32, size);
 }
 
-fn startCommands(hsa_amd: *const c.AmdExtTable, cpu_pool: c.hsa_amd_memory_pool_t) ![]pm4.Word {
-    var cmdbuf = try CmdBuf.alloc(hsa_amd, cpu_pool, start_cmd_size);
-    errdefer cmdbuf.free(hsa_amd);
+fn startCommands(instance: *const hsa.Instance, cpu_pool: hsa.MemoryPool) ![]pm4.Word {
+    var cmdbuf = try CmdBuf.alloc(instance, cpu_pool, start_cmd_size);
+    errdefer cmdbuf.free(instance);
     cmdbuf.nop();
     return cmdbuf.words();
 }
 
-fn stopCommands(hsa_amd: *const c.AmdExtTable, cpu_pool: c.hsa_amd_memory_pool_t) ![]pm4.Word {
-    var cmdbuf = try CmdBuf.alloc(hsa_amd, cpu_pool, stop_cmd_size);
-    errdefer cmdbuf.free(hsa_amd);
+fn stopCommands(instance: *const hsa.Instance, cpu_pool: hsa.MemoryPool) ![]pm4.Word {
+    var cmdbuf = try CmdBuf.alloc(instance, cpu_pool, stop_cmd_size);
+    errdefer cmdbuf.free(instance);
     cmdbuf.nop();
     return cmdbuf.words();
 }
