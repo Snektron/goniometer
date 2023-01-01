@@ -24,14 +24,42 @@ pub const DeviceType = enum(c_int) {
 
 pub const Attribute = enum(c_int) {
     name = c.HSA_AGENT_INFO_NAME,
+    vendor_name = c.HSA_AGENT_INFO_VENDOR_NAME,
     device_type = c.HSA_AGENT_INFO_DEVICE,
+    node = c.HSA_AGENT_INFO_NODE,
+    cache_size = c.HSA_AGENT_INFO_CACHE_SIZE,
+
+    max_clock_freq = c.HSA_AMD_AGENT_INFO_MAX_CLOCK_FREQUENCY,
+    product_name = c.HSA_AMD_AGENT_INFO_PRODUCT_NAME,
     num_shader_engines = c.HSA_AMD_AGENT_INFO_NUM_SHADER_ENGINES,
+    timestamp_freq = c.HSA_AMD_AGENT_INFO_TIMESTAMP_FREQUENCY,
+    max_memory_freq = c.HSA_AMD_AGENT_INFO_MEMORY_MAX_FREQUENCY,
+    asic_revision = c.HSA_AMD_AGENT_INFO_ASIC_REVISION,
+    num_compute_units = c.HSA_AMD_AGENT_INFO_COMPUTE_UNIT_COUNT,
+    num_simds_per_cu = c.HSA_AMD_AGENT_INFO_NUM_SIMDS_PER_CU,
+    max_waves_per_cu = c.HSA_AMD_AGENT_INFO_MAX_WAVES_PER_CU,
+    memory_width = c.HSA_AMD_AGENT_INFO_MEMORY_WIDTH,
+    chip_id = c.HSA_AMD_AGENT_INFO_CHIP_ID,
 
     pub fn Type(comptime self: Attribute) type {
         return switch (self) {
             .name => [64]u8,
+            .vendor_name => [64]u8,
             .device_type => DeviceType,
+            .node => u32,
+            .cache_size => [4]u32,
+
+            .max_clock_freq => u32,
+            .product_name => [64]u8,
             .num_shader_engines => u32,
+            .timestamp_freq => u64,
+            .max_memory_freq => u32,
+            .asic_revision => u32,
+            .num_compute_units => u32,
+            .num_simds_per_cu => u32,
+            .max_waves_per_cu => u32,
+            .memory_width => u32,
+            .chip_id => u32,
         };
     }
 };

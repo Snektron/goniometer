@@ -2,6 +2,8 @@
 const Self = @This();
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const pm4 = @import("pm4.zig");
 const hsa = @import("hsa.zig");
 const CmdBuf = @import("CmdBuf.zig");
@@ -20,8 +22,9 @@ const stop_cmd_size = 0x400;
 const sqtt_buffer_align_shift = 12;
 const sqtt_buffer_align = 1 << sqtt_buffer_align_shift;
 
-/// Taken from mesa.
-const ThreadTraceInfo = extern struct {
+/// Additional thread trace information that is obtained from the gpu.
+/// Structure taken from Mesa.
+pub const ThreadTraceInfo = extern struct {
     cur_offset: u32,
     trace_status: u32,
     arch: extern union {
@@ -30,27 +33,54 @@ const ThreadTraceInfo = extern struct {
     },
 };
 
+/// Represents a finished trace, for a single shader engine.
+pub const Trace = struct {
+    info: ThreadTraceInfo,
+    /// The sqtt data, as reported by the gpu.
+    /// Memory is owned by the allocator passed to read().
+    data: []const u8,
+    /// The shader engine that this trace was recorded for.
+    shader_engine: u32,
+    /// The compute unit on the shader engien that this trace was recorded for.
+    compute_unit: u32,
+
+    pub fn deinit(self: *Trace, a: Allocator) void {
+        a.free(self.data);
+        self.* = undefined;
+    }
+};
+
 /// This is a HSA-compatible packet used for thread tracing.
 /// Actually, this structure is the same as hsa_ext_amd_aql_pm4_packet_t,
 /// but just a bit touched up for us to use.
+/// Note: This packet is different for GFX <= 8. Check AMDPAL for its structure
+/// in that situation.
 pub const Packet = extern struct {
     comptime {
         std.debug.assert(@sizeOf(Packet) == hsa.Packet.alignment);
     }
 
-    const pm4_size = 13;
+    const pm4_size = 4;
+
+    /// Sub-type of this packet
+    pub const Type = enum(u16) {
+        // PM4 'indirect_buffer' command. Only the indirect buffer command may
+        // be placed in the pm4 data, it seems.
+        pm4_ib = 0x1,
+    };
 
     /// HSA packet header, set to 0 for vendor-specific packet.
     header: hsa.Packet.Header,
-    /// Not sure yet if this is really the number of pm4 packets, but when the
-    /// indirect buffer command is there this is set to 1 and if there is no command
-    /// there it is set to 0.
-    maybe_number_of_packets: u16 = 1,
-    /// The actual PM4 commands. There is only enough space for a few here, which is
-    /// this is only going to contain an `indirect_buffer` command to invoke a
-    /// secondary command buffer which is able to be stored on-heap and so
-    /// able to have more commands.
+    /// Vendor-specific-packet header.
+    ven_hdr: Type,
+    /// The actual PM4 command for this packet. It seems that there can only be one
+    /// type of command here, corresponding to the ven_hdr, of which currently only
+    /// the IB command is known.
     pm4: [pm4_size]pm4.Word,
+    /// The amount of words that remain
+    dw_remain: u32,
+    /// Padding
+    _reserved: [8]u32 = .{0} ** 8,
     /// Signal that probably gets ringed if this packet has been finished executing or something.
     completion_signal: hsa.Signal,
 
@@ -62,7 +92,9 @@ pub const Packet = extern struct {
                 .acquire_fence_scope = 0,
                 .release_fence_scope = 0,
             },
+            .ven_hdr = .pm4_ib,
             .pm4 = .{0} ** pm4_size,
+            .dw_remain = 0xA,
             .completion_signal = .{ .handle = 0 },
         };
         var cmdbuf = CmdBuf{
@@ -70,8 +102,6 @@ pub const Packet = extern struct {
             .buf = &packet.pm4,
         };
         cmdbuf.indirectBuffer(ib);
-        // IDK why this is required, but aqlprofile does it in rocprof.
-        cmdbuf.weirdAqlProfilePacketStreamTerminator();
         return packet;
     }
 
@@ -91,25 +121,24 @@ stop_packet: Packet,
 pub fn init(
     instance: *const hsa.Instance,
     cpu_pool: hsa.MemoryPool,
-    agent: hsa.Agent,
+    agent_info: AgentInfo,
 ) !Self {
-    const shader_engines = instance.getAgentInfo(agent, .num_shader_engines);
     const output_buffer = try instance.memoryPoolAllocate(
         u8,
         cpu_pool,
-        threadTraceBufferSize(shader_engines, thread_trace_buffer_size),
+        threadTraceBufferSize(agent_info.shader_engines, thread_trace_buffer_size),
     );
     std.mem.set(u8, output_buffer, 0);
     errdefer instance.memoryPoolFree(output_buffer);
-    instance.agentsAllowAccess(output_buffer.ptr, &.{agent});
+    instance.agentsAllowAccess(output_buffer.ptr, &.{agent_info.agent});
 
-    const start_ib = try startCommands(instance, cpu_pool, shader_engines, output_buffer);
+    const start_ib = try startCommands(instance, cpu_pool, agent_info.shader_engines, output_buffer);
     errdefer instance.memoryPoolFree(start_ib);
-    instance.agentsAllowAccess(start_ib.ptr, &.{agent});
+    instance.agentsAllowAccess(start_ib.ptr, &.{agent_info.agent});
 
-    const stop_ib = try stopCommands(instance, cpu_pool, shader_engines, output_buffer);
+    const stop_ib = try stopCommands(instance, cpu_pool, agent_info.shader_engines, output_buffer);
     errdefer instance.memoryPoolFree(stop_ib);
-    instance.agentsAllowAccess(stop_ib.ptr, &.{agent});
+    instance.agentsAllowAccess(stop_ib.ptr, &.{agent_info.agent});
 
     var self = Self{
         .output_buffer = output_buffer,
@@ -357,4 +386,30 @@ fn stopCommands(
     });
 
     return cmdbuf.words();
+}
+
+/// Fetches the trace information from the GPU. `agent_info` must be the
+/// the same as that passed to `init`. Traces will be added to `out`, and
+/// each trace must be deinitialized using `a`.
+pub fn read(self: *Self, out: *std.ArrayList(Trace), a: Allocator, agent_info: AgentInfo) !void {
+    const shader_engines = agent_info.shader_engines;
+    const output_va = @ptrToInt(self.output_buffer.ptr);
+    var shader_engine: u32 = 0;
+    while (shader_engine < shader_engines) : (shader_engine += 1) {
+        // Note: logic for selecting SEs and CUs to use should be kept the same as in startCommands.
+        const info_va = output_va + threadTraceInfoOffset(shader_engine);
+        const data_va = output_va + threadTraceDataOffset(thread_trace_buffer_size, shader_engine, shader_engines);
+        const first_active_cu = 0;
+
+        // Data pointer is mapped to CPU, so we can just copy it directly.
+        const info = @intToPtr(*const ThreadTraceInfo, info_va);
+        const data = @intToPtr([*]const u8, data_va)[0..info.cur_offset * 32];
+
+        try out.append(.{
+            .info = info.*,
+            .data = try a.dupe(u8, data),
+            .shader_engine = shader_engine,
+            .compute_unit = first_active_cu,
+        });
+    }
 }

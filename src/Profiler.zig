@@ -9,8 +9,8 @@ const stop_trace_signal_timeout_ns = std.time.ns_per_s * 10;
 
 /// A proxy HSA queue that we can use to intercept HSA packets.
 pub const ProfileQueue = struct {
-    /// The agent that created this queue
-    agent: hsa.Agent,
+    /// The index of the agent that created this queue, into `agents`.
+    agent: usize,
     /// The real queue that commands will be submitted to.
     backing_queue: *hsa.Queue,
     /// The HSA handle for this proxying queue.
@@ -39,10 +39,62 @@ pub const ProfileQueue = struct {
 
 /// Meta-information tho avoid having it to query all the time.
 pub const AgentInfo = struct {
+    /// The AMD architecture level. This value is the architecture in hexadecimal (eg, 0x1030 for gfx1030).
+    /// If this is not applicable for the current agent, its .not_applicable.
+    pub const GcnArch = enum(u32) {
+        not_applicable = 0,
+        // Common ones can be added here, for utility.
+        gfx1030 = 0x1030,
+        _,
+
+        pub fn major(self: GcnArch) u32 {
+            return @enumToInt(self) >> 8;
+        }
+
+        pub fn minor(self: GcnArch) u32 {
+            return (@enumToInt(self) >> 4) & 0xF;
+        }
+    };
+
+    /// The agent that this information concerns. Will be used as key for the `agents` map.
+    agent: hsa.Agent,
+    /// Name of agent, zero-terminated (max 63 chars).
+    name: [64]u8,
     /// The type of the agent. Thread traces will only be valid for queues created for a gpu agent.
     agent_type: hsa.DeviceType,
     /// The primary (device-local) pool to allocate memory from for this agent.
     primary_pool: hsa.MemoryPool,
+    /// The number of shader engines that this agent has. This is here so that we
+    /// dont have to query it all the time.
+    shader_engines: u32,
+    /// The agent's GCN architecture level. If this is a cpu agent, this is .not_applicable.
+    gcn_arch: GcnArch,
+
+    pub const HashContext = struct {
+        pub fn hash(self: @This(), agent_info: AgentInfo) u32 {
+            _ = self;
+            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&agent_info.agent.handle)));
+        }
+
+        pub fn eql(self: @This(), a: AgentInfo, b: AgentInfo, b_index: usize) bool {
+            _ = self;
+            _ = b_index;
+            return a.agent.handle == b.agent.handle;
+        }
+    };
+
+    pub const HashContextByAgent = struct {
+        pub fn hash(self: @This(), agent: hsa.Agent) u32 {
+            _ = self;
+            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&agent.handle)));
+        }
+
+        pub fn eql(self: @This(), agent: hsa.Agent, agent_info: AgentInfo, b_index: usize) bool {
+            _ = self;
+            _ = b_index;
+            return agent.handle == agent_info.agent.handle;
+        }
+    };
 };
 
 /// The allocator to use for profiling data.
@@ -50,7 +102,7 @@ a: std.mem.Allocator,
 /// The HSA instance that we call into.
 instance: hsa.Instance,
 /// A map of agents and some useful information about them.
-agents: std.AutoArrayHashMapUnmanaged(hsa.Agent, AgentInfo) = .{},
+agents: std.ArrayHashMapUnmanaged(AgentInfo, void, AgentInfo.HashContext, true) = .{},
 /// The CPU agent that we use to allocate host resources, such as CPU-GPU
 /// shared memory etc. Index into `agents`.
 cpu_agent: u32,
@@ -69,6 +121,10 @@ pub fn init(a: std.mem.Allocator, api_table: *const hsa.ApiTable) !Profiler {
 }
 
 pub fn deinit(self: *Profiler) void {
+    // for (self.queues.items()) |pq| {
+    //     pq.trace.deinit(self.a);
+    // }
+
     self.agents.deinit(self.a);
     self.queues.deinit(self.a);
     self.* = undefined;
@@ -77,40 +133,56 @@ pub fn deinit(self: *Profiler) void {
 fn queryAgents(self: *Profiler) !void {
     _ = try self.instance.iterateAgents(self, queryAgentsCbk);
 
-    for (self.agents.keys()) |agent, i| {
-        const name_buf = self.instance.getAgentInfo(agent, .name);
-        const name = std.mem.sliceTo(&name_buf, 0);
-
-        const agent_type = self.instance.getAgentInfo(agent, .device_type);
-        const type_str = switch (agent_type) {
-            .cpu => "cpu",
-            .gpu => "gpu",
-            _ => "other",
-        };
-
-        std.log.info("found device '{s}' of type {s}", .{ name, type_str });
-
-        switch (agent_type) {
-            .cpu => {
-                self.cpu_agent = @intCast(u32, i);
-            },
-            else => {},
-        }
-
-        const pool = (try self.instance.iterateMemoryPools(agent, self, queryAgentPoolsCbk)) orelse {
-            std.log.err("failed to find a suitable primary memory pool for agent {} ({s})", .{ agent.handle, name });
-            return error.Generic;
-        };
-
-        self.agents.values()[i] = .{
-            .agent_type = agent_type,
-            .primary_pool = pool,
-        };
-    }
+    self.cpu_agent = for (self.agents.keys()) |info, i| {
+        if (info.agent_type == .cpu)
+            break @intCast(u32, i);
+    } else {
+        std.log.err("system has no cpu agent", .{});
+        return error.Genric;
+    };
 }
 
 fn queryAgentsCbk(self: *Profiler, agent: hsa.Agent) !?void {
-    _ = self.agents.getOrPut(self.a, agent) catch return error.OutOfResources;
+    const result = self.agents.getOrPut(self.a, AgentInfo{
+        .agent = agent,
+        // Fields are filled in momentarily.
+        .name = undefined,
+        .agent_type = undefined,
+        .primary_pool = undefined,
+        .shader_engines = undefined,
+        .gcn_arch = .not_applicable,
+    }) catch return error.OutOfResources;
+    std.debug.assert(!result.found_existing); // bug in HSA: the same agent is reported twice.
+    const info = result.key_ptr;
+
+    info.name = self.instance.getAgentInfo(agent, .name);
+    info.agent_type = self.instance.getAgentInfo(agent, .device_type);
+    info.shader_engines = self.instance.getAgentInfo(agent, .num_shader_engines);
+
+    const name = std.mem.sliceTo(&info.name, 0);
+    const type_str = switch (info.agent_type) {
+        .cpu => "cpu",
+        .gpu => "gpu",
+        _ => "other",
+    };
+    std.log.info("found device '{s}' of type {s}", .{ name, type_str });
+
+    if (std.mem.startsWith(u8, name, "gfx")) {
+        // Try to parse the remainder as gfx architecture level. These are in the form
+        // `gfxX` where X are 3 or 4 hexadecimal chars. We're just going to cheat and
+        // interpret the rest of the string as hex.
+        if (std.fmt.parseInt(u32, name[3..], 16)) |arch_level| {
+            info.gcn_arch = @intToEnum(AgentInfo.GcnArch, arch_level);
+        } else |_| {
+            std.log.warn("could not parse gfx-like device name '{s}' as gcn arch level", .{name});
+        }
+    }
+
+    info.primary_pool = (try self.instance.iterateMemoryPools(agent, self, queryAgentPoolsCbk)) orelse {
+        std.log.err("failed to find a suitable primary memory pool for agent 0x{x} ({s})", .{ info.agent.handle, name });
+        return error.Generic;
+    };
+
     return null;
 }
 
@@ -161,18 +233,19 @@ pub fn createQueue(
     const packet_buf = try self.a.allocWithOptions(hsa.Packet, size, hsa.Packet.alignment, null);
     errdefer self.a.free(packet_buf);
 
-    // Allocate the thread trace in GPU-accessible host memory.
-    const cpu_agent_info = self.agents.values()[self.cpu_agent];
+    const gpu_agent_index = self.agents.getIndexAdapted(agent, AgentInfo.HashContextByAgent{}).?;
+    const gpu_agent_info = self.agents.keys()[gpu_agent_index];
+    const cpu_agent_info = self.agents.keys()[self.cpu_agent];
     var thread_trace = try ThreadTrace.init(
         &self.instance,
         cpu_agent_info.primary_pool,
-        agent,
+        gpu_agent_info,
     );
     errdefer thread_trace.deinit(&self.instance);
 
     const pq = try self.a.create(ProfileQueue); // Needs to be pinned in memory.
     pq.* = ProfileQueue{
-        .agent = agent,
+        .agent = gpu_agent_index,
         .backing_queue = backing_queue,
         .queue = .{
             .type = backing_queue.*.type,
@@ -271,28 +344,26 @@ pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) !void {
     }
     self.instance.signalStore(pq.thread_trace.stop_packet.completion_signal, 1, .Monotonic);
 
-    rgp.dumpCapture("dump.rgp", &pq.thread_trace) catch |err| {
+    const cpu_agent_info = self.agents.keys()[self.cpu_agent];
+    const gpu_agent_info = self.agents.keys()[pq.agent];
+
+    var traces = std.ArrayList(ThreadTrace.Trace).init(self.a);
+    defer {
+        for (traces.items) |*trace| {
+            trace.deinit(self.a);
+        }
+        traces.deinit();
+    }
+    try pq.thread_trace.read(&traces, self.a, gpu_agent_info);
+
+    rgp.dumpCapture(
+        "dump.rgp",
+        &self.instance,
+        cpu_agent_info,
+        gpu_agent_info,
+        traces.items,
+    ) catch |err| {
         std.log.err("failed to save capture: {s}", .{@errorName(err)});
         return error.Save;
     };
-
-    // const trace_offset = for (pq.thread_trace.output_buffer) |b, i| {
-    //     if (b != 0) break i;
-    // } else null;
-
-    // if (trace_offset) |offset| {
-    //     std.log.info("trace buffer data found at index: {}", .{offset});
-    // } else {
-    //     std.log.info("no trace data found :(", .{});
-    // }
-
-    // std.log.debug("first few words:", .{});
-    // for (std.mem.bytesAsSlice(u32, pq.thread_trace.output_buffer)[0..32]) |w| {
-    //     std.log.debug("0x{x}", .{w});
-
-    // }
-    // std.log.debug("...", .{});
-    // for (std.mem.bytesAsSlice(u32, pq.thread_trace.output_buffer)[0x400..][0..32]) |w| {
-    //     std.log.debug("0x{x}", .{w});
-    // }
 }

@@ -144,9 +144,3 @@ pub fn indirectBuffer(self: *Self, buf: []const pm4.Word) void {
     };
     self.pkt3(.indirect_buffer, .{}, asWords(&ib));
 }
-
-/// For some reason the indirect buffer command in the aqlprofile packet is terminated
-/// with 0xa.
-pub fn weirdAqlProfilePacketStreamTerminator(self: *Self) void {
-    self.emit(&.{0xa});
-}

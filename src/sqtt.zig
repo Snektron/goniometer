@@ -54,13 +54,13 @@ pub const ChunkHeader = extern struct {
     ver_minor: u16,
     ver_major: u16,
     size_bytes: u32,
-    padding: i32 = 0,
+    _padding: i32 = 0,
 };
 
 pub const CpuInfo = extern struct {
     header: ChunkHeader,
-    vendor_id: [3 * 4]u8,
-    processor_brand: [12 * 4]u8,
+    vendor_id: [12]u8,
+    processor_brand: [48]u8,
     _reserved: [2]u32 = .{ 0, 0 },
     cpu_timestamp_freq: u64,
     clock_speed: u32,
@@ -72,6 +72,12 @@ pub const CpuInfo = extern struct {
 pub const AsicInfo = extern struct {
     pub const GpuType = enum(u32) { unknown = 0x0, integrated = 0x1, discrete = 0x2, virtual = 0x3 };
 
+    pub const Flags = packed struct(u64) {
+        sc_packer_numbering: bool,
+        ps1_event_tokens_enabled: bool,
+        _reserved: u62 = 0,
+    };
+
     pub const GfxipLevel = enum(u32) {
         none = 0x0,
         gfxip_6 = 0x1,
@@ -81,6 +87,7 @@ pub const AsicInfo = extern struct {
         gfxip_9 = 0x5,
         gfxip_10_1 = 0x7,
         gfxip_10_3 = 0x9,
+        gfxip_11 = 0xC,
     };
 
     pub const MemoryType = enum(u32) {
@@ -105,36 +112,36 @@ pub const AsicInfo = extern struct {
     pub const sa_per_se = 2;
 
     header: ChunkHeader,
-    flags: u64,
+    flags: Flags,
     trace_shader_core_clock: u64,
     trace_memory_clock: u64,
-    device_id: i32,
-    device_revision_id: i32,
-    vgprs_per_simd: i32,
-    sgprs_per_simd: i32,
-    shader_engines: i32,
-    compute_units_per_shader_engine: i32,
-    simds_per_compute_unit: i32,
-    wavefronts_per_simd: i32,
-    minimum_vgpr_alloc: i32,
-    vgpr_alloc_granularity: i32,
-    minimum_sgpr_alloc: i32,
-    sgpr_alloc_granularity: i32,
-    hardware_contexts: i32,
+    device_id: u32,
+    device_revision_id: u32,
+    vgprs_per_simd: u32,
+    sgprs_per_simd: u32,
+    shader_engines: u32,
+    compute_units_per_shader_engine: u32,
+    simds_per_compute_unit: u32,
+    wavefronts_per_simd: u32,
+    minimum_vgpr_alloc: u32,
+    vgpr_alloc_granularity: u32,
+    minimum_sgpr_alloc: u32,
+    sgpr_alloc_granularity: u32,
+    hardware_contexts: u32,
     gpu_type: GpuType,
     gfxip_level: GfxipLevel,
-    gpu_index: i32,
-    gds_size: i32,
-    gfs_per_shader_engine: i32,
-    ce_ram_size: i32,
-    ce_ram_size_graphics: i32,
-    ce_ram_size_compute: i32,
-    max_number_of_dedicated_cus: i32,
+    gpu_index: u32,
+    gds_size: u32,
+    gds_per_shader_engine: u32,
+    ce_ram_size: u32,
+    ce_ram_size_graphics: u32,
+    ce_ram_size_compute: u32,
+    max_number_of_dedicated_cus: u32,
     vram_size: i64,
-    vram_bus_width: i32,
-    l2_cache_size: i32,
-    l1_cache_size: i32,
-    lds_size: i32,
+    vram_bus_width: u32,
+    l2_cache_size: u32,
+    l1_cache_size: u32,
+    lds_size: u32,
     gpu_name: [gpu_name_max_size]u8,
     alu_per_clock: f32,
     texture_per_clock: f32,
@@ -148,15 +155,16 @@ pub const AsicInfo = extern struct {
     lds_granularity: u32,
     cu_mask: [max_num_se][sa_per_se]u16,
     _reserved1: [128]u8 = .{0} ** 128,
-    padding: [4]u8 = .{0} ** 4,
+    _padding: [4]u8 = .{0} ** 4,
 };
 
 pub const ApiInfo = extern struct {
     pub const ApiType = enum(u32) {
-        directx12,
-        vulkan,
-        generic,
-        opencl,
+        directx12 = 0,
+        vulkan = 1,
+        generic = 2,
+        opencl = 3,
+        hip = 5,
     };
 
     pub const InstructionTraceMode = enum(u32) {
@@ -209,4 +217,27 @@ pub const ApiInfo = extern struct {
     instruction_trace_mode: InstructionTraceMode,
     _reserved2: u32 = 0,
     instruction_trace_data: InstructionTraceData,
+};
+
+pub const SqttDesc = extern struct {
+    pub const Version = enum(c_int) {
+        none = 0x0,
+        @"2.2" = 0x5, // GFX8
+        @"2.3" = 0x6, // GFX9
+        @"2.4" = 0x7, // GFX10,
+        @"3.2" = 0xb, // GFX11
+    };
+
+    header: ChunkHeader,
+    shader_engine_index: u32,
+    version: Version,
+    instrumentation_spec_version: u16,
+    instrumentation_api_version: u16,
+    compute_unit_index: u32,
+};
+
+pub const SqttData = extern struct {
+    header: ChunkHeader,
+    offset: i32,
+    size: u32,
 };
