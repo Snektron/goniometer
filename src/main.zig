@@ -71,9 +71,9 @@ fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) vo
     while (i < end) : (i += 1) {
         const index = i % pq.queue.size;
         const packet = &packet_buf[index];
-        if (packet.header.packet_type == .kernel_dispatch) {
+        if (packet.cast(.kernel_dispatch)) |kernel_dispatch_packet| {
             profiler.startTrace(pq);
-            profiler.submit(pq, packet);
+            profiler.dispatchKernel(pq, kernel_dispatch_packet);
             profiler.stopTrace(pq) catch |err| {
                 std.log.err("failed to read thread trace: {s}", .{@errorName(err)});
             };

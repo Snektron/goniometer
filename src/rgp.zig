@@ -135,7 +135,7 @@ fn asicInfo(instance: *const hsa.Instance, agent_info: AgentInfo) sqtt.AsicInfo 
         .memory_ops_per_clock = 16,
         .memory_chip_type = .gddr6,
         .lds_granularity = 64 * 4,
-        .cu_mask = .{.{1023, 1023}, .{1023, 1023}} ++ .{.{0} ** 2} ** 30,
+        .cu_mask = .{ .{ 1023, 1023 }, .{ 1023, 1023 } } ++ .{.{0} ** 2} ** 30,
     };
 }
 

@@ -403,7 +403,7 @@ pub fn read(self: *Self, out: *std.ArrayList(Trace), a: Allocator, agent_info: A
 
         // Data pointer is mapped to CPU, so we can just copy it directly.
         const info = @intToPtr(*const ThreadTraceInfo, info_va);
-        const data = @intToPtr([*]const u8, data_va)[0..info.cur_offset * 32];
+        const data = @intToPtr([*]const u8, data_va)[0 .. info.cur_offset * 32];
 
         try out.append(.{
             .info = info.*,

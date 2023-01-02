@@ -22,16 +22,16 @@ pub const ProfileQueue = struct {
     /// Thread trace data.
     thread_trace: ThreadTrace,
 
-    pub fn packetBuffer(self: *ProfileQueue) []hsa.Packet {
+    pub fn packetBuffer(self: *ProfileQueue) []align(hsa.Packet.alignment) hsa.Packet {
         return @ptrCast(
-            [*]hsa.Packet,
+            [*]align(hsa.Packet.alignment) hsa.Packet,
             @alignCast(hsa.Packet.alignment, self.queue.base_address.?),
         )[0..self.queue.size];
     }
 
-    fn backingPacketBuffer(self: *ProfileQueue) []hsa.Packet {
+    fn backingPacketBuffer(self: *ProfileQueue) []align(hsa.Packet.alignment) hsa.Packet {
         return @ptrCast(
-            [*]hsa.Packet,
+            [*]align(hsa.Packet.alignment) hsa.Packet,
             @alignCast(hsa.Packet.alignment, self.backing_queue.base_address.?),
         )[0..self.backing_queue.size];
     }
@@ -313,6 +313,7 @@ pub fn getProfileQueue(self: *Profiler, queue: *const hsa.Queue) ?*ProfileQueue 
     return self.queues.get(queue.doorbell_signal);
 }
 
+/// Start tracing.
 pub fn startTrace(self: *Profiler, pq: *ProfileQueue) void {
     // The stuff done in this function is mainly based on
     // https://github.com/Mesa3D/mesa/blob/main/src/amd/vulkan/radv_sqtt.c
@@ -322,6 +323,7 @@ pub fn startTrace(self: *Profiler, pq: *ProfileQueue) void {
     self.submit(pq, pq.thread_trace.start_packet.asHsaPacket());
 }
 
+/// Stop tracing.
 pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) !void {
     std.log.info("stopping kernel trace", .{});
     self.submit(pq, pq.thread_trace.stop_packet.asHsaPacket());
@@ -366,4 +368,21 @@ pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) !void {
         std.log.err("failed to save capture: {s}", .{@errorName(err)});
         return error.Save;
     };
+}
+
+/// Dispatch a kernel packet. This function makes sure to record the relevant info in the queue's trace.
+pub fn dispatchKernel(
+    self: *Profiler,
+    pq: *ProfileQueue,
+    packet: *align(hsa.Packet.alignment) const hsa.KernelDispatchPacket,
+) void {
+    // Obtain the AMD kernel code handle for this packet.
+    // TODO: Make sure that this is a device queue?
+    const kernel_code = self.instance.loaderQueryHostAddress(
+        hsa.AmdKernelCode,
+        @intToPtr(*const hsa.AmdKernelCode, packet.kernel_object),
+    );
+    std.log.debug("{}", .{kernel_code});
+
+    self.submit(pq, @ptrCast(*align(hsa.Packet.alignment) const hsa.Packet, packet));
 }

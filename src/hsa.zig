@@ -7,6 +7,8 @@ pub const c = @cImport({
     @cInclude("hsa/hsa.h");
     @cInclude("hsa/hsa_ext_amd.h");
     @cInclude("hsa/hsa_ven_amd_aqlprofile.h");
+    @cInclude("hsa/hsa_ven_amd_loader.h");
+    @cInclude("hsa/amd_hsa_kernel_code.h");
 });
 
 pub const Status = c.hsa_status_t;
@@ -15,6 +17,138 @@ pub const Queue = c.hsa_queue_t;
 pub const Signal = c.hsa_signal_t;
 pub const SignalValue = c.hsa_signal_value_t;
 pub const MemoryPool = c.hsa_amd_memory_pool_t;
+pub const KernelDispatchPacket = c.hsa_kernel_dispatch_packet_t;
+
+pub const AmdKernelCode = extern struct {
+    pub const MachineKind = enum(u16) {
+        undef = 0,
+        amdgpu = 1,
+        _,
+    };
+
+    pub const ComputePgmRsrc1 = packed struct(u32) {
+        granulated_workitem_vgpr_count: u6,
+        granulated_wavefront_sgpr_count: u4,
+        priority: u2,
+        float_round_mode_32: u2,
+        float_found_mode_16_64: u2,
+        float_denorm_mode_32: u2,
+        float_denorm_mode_16_64: u2,
+        priv: bool,
+        enable_dx10_clamp: bool,
+        debug_mode: bool,
+        enable_ieee_mode: bool,
+        bulky: bool,
+        cdbg_user: bool,
+        _reserved1: u6 = 0,
+    };
+
+    pub const ComputePgmRsrc2 = packed struct(u32) {
+        enable_sgpr_private_segment_wave_byte_offset: bool,
+        user_sgpr_count: u5,
+        enable_trap_handler: bool,
+        enable_sgpr_workgroup_id_x: bool,
+        enable_sgpr_workgroup_id_y: bool,
+        enable_sgpr_workgroup_id_z: bool,
+        enable_sgpr_workgroup_id_info: bool,
+        enable_vgpr_workitem_id: u2,
+        enable_exception_address_watch: bool,
+        enable_exception_memory_violation: bool,
+        granulated_lds_size: u9,
+        enable_exception_ieee_754_fp_invalid_operation: bool,
+        enable_exception_fp_denormal_source: bool,
+        enable_exception_ieee_754_fp_division_by_zero: bool,
+        enable_exception_ieee_754_fp_overflow: bool,
+        enable_exception_ieee_754_fp_underflow: bool,
+        enable_exception_ieee_754_fp_inexact: bool,
+        enable_exception_int_division_by_zero: bool,
+        _reserved1: u1 = 0,
+    };
+
+    pub const KernelCodeProperties = packed struct(u32) {
+        enable_sgpr_private_segment_buffer: bool,
+        enable_sgpr_dispatch_ptr: bool,
+        enable_sgpr_queue_ptr: bool,
+        enable_sgpr_kernarg_segment_ptr: bool,
+        enable_sgpr_dispatch_id: bool,
+        enable_sgpr_flat_scratch_init: bool,
+        enable_sgpr_private_segment_size: bool,
+        enable_sgpr_grid_workgroup_count_x: bool,
+        enable_sgpr_grid_workgroup_count_y: bool,
+        enable_sgpr_grid_workgroup_count_z: bool,
+        enable_wavefront32: bool,
+        uses_dynamic_stack: bool,
+        _reserved1: u4 = 0,
+        enable_ordered_append_gds: bool,
+        private_element_size: u2,
+        is_ptr64: bool,
+        is_dynamic_callstack: bool,
+        is_debug_enabled: bool,
+        is_xnack_enabled: bool,
+        _reserved2: u9 = 0,
+    };
+
+    pub const EnabledControlDirectives = packed struct(u64) {
+        enable_break_exceptions: bool,
+        enable_detect_exceptions: bool,
+        max_dynamic_group_size: bool,
+        max_flat_grid_size: bool,
+        required_dim: bool,
+        required_grid_size: bool,
+        required_workgroup_size: bool,
+        require_no_partial_workgroups: bool,
+        _reserved: u56 = 0,
+    };
+
+    pub const ControlDirectives = extern struct {
+        enabled_control_directives: EnabledControlDirectives,
+        enable_break_exceptions: u16,
+        enable_detect_exceptions: u16,
+        max_dynamic_group_size: u32,
+        max_flat_grid_size: u64,
+        max_flat_workgroup_size: u32,
+        required_dim: u8,
+        _reserved1: [3]u8,
+        required_grid_size: [3]u64,
+        required_workgroup_size: [3]u32,
+        _reserved2: [60]u8,
+    };
+
+    ver_major: u32,
+    ver_minor: u32,
+    machine_kind: MachineKind,
+    machine_ver_major: u16,
+    machine_ver_minor: u16,
+    machine_ver_stepping: u16,
+    kernel_code_entry_byte_offset: i64,
+    kernel_code_prefetch_byte_offset: i64,
+    kernel_code_prefetch_byte_size: u64,
+    max_scratch_backing_memory_byte_size: u64,
+    compute_pgm_rsrc1: ComputePgmRsrc1,
+    compute_pgm_rsrc2: ComputePgmRsrc2,
+    kernel_code_properties: KernelCodeProperties,
+    workitem_private_segment_byte_size: u32,
+    workgroup_group_segment_byte_size: u32,
+    gds_segment_byte_size: u32,
+    kernarg_segment_byte_size: u64,
+    workgroup_fbarrier_count: u32,
+    wavefront_sgpr_count: u16,
+    workitem_vgpr_count: u16,
+    reserved_vgpr_first: u16,
+    reserved_vgpr_count: u16,
+    reserved_sgpr_first: u16,
+    reserved_sgpr_count: u16,
+    debug_wavefront_private_segment_offset_sgpr: u16,
+    debug_private_segment_buffer_sgpr: u16,
+    kernarg_segment_alignment: u8,
+    group_segment_alignment: u8,
+    private_segment_alignment: u8,
+    wavefront_size: u8,
+    call_convention: u32,
+    _reserved1: [12]u8,
+    runtime_loader_kernel_symbol: u64,
+    control_directives: ControlDirectives align(64),
+};
 
 pub const DeviceType = enum(c_int) {
     cpu = c.HSA_DEVICE_TYPE_CPU,
@@ -101,6 +235,16 @@ pub const MemoryPoolAttribute = enum(c_int) {
     }
 };
 
+pub const Extension = enum(c_int) {
+    finalizer = 0,
+    images = 1,
+    performance_counters = 2,
+    profiling_events = 3,
+    amd_profiler = 0x200,
+    amd_loader = 0x201,
+    amd_aqlprofile = 0x202,
+};
+
 /// HSA headers dont define a generic packet type :/
 pub const Packet = extern struct {
     pub const alignment = 64;
@@ -112,6 +256,13 @@ pub const Packet = extern struct {
         barrier_and = c.HSA_PACKET_TYPE_BARRIER_AND,
         agent_dispatch = c.HSA_PACKET_TYPE_AGENT_DISPATCH,
         barrier_or = c.HSA_PACKET_TYPE_BARRIER_OR,
+
+        pub fn PacketType(comptime self: Type) type {
+            return switch (self) {
+                .kernel_dispatch => KernelDispatchPacket,
+                else => unreachable, // Add if required.
+            };
+        }
     };
 
     pub const Header = packed struct(u16) {
@@ -128,11 +279,13 @@ pub const Packet = extern struct {
 
     header: Header,
     body: [31]u16,
-};
 
-pub const IterationAction = enum {
-    @"break",
-    @"continue",
+    pub fn cast(self: *align(alignment) Packet, comptime ty: Type) ?*align(alignment) ty.PacketType() {
+        if (self.header.packet_type == ty) {
+            return @ptrCast(*ty.PacketType(), self);
+        }
+        return null;
+    }
 };
 
 /// This struct represents a handle to HSA. This struct holds the function pointers that
@@ -159,8 +312,22 @@ pub const Instance = struct {
     amd_memory_pool_allocate: *const @TypeOf(c.hsa_amd_memory_pool_allocate),
     amd_memory_pool_free: *const @TypeOf(c.hsa_amd_memory_pool_free),
     amd_memory_pool_get_info: *const @TypeOf(c.hsa_amd_memory_pool_get_info),
+    amd_loader_query_host_address: *const @TypeOf(c.hsa_ven_amd_loader_query_host_address),
 
     pub fn init(api_table: *const ApiTable) Instance {
+        var loader_api: c.hsa_ven_amd_loader_1_03_pfn_t = undefined;
+        switch (api_table.core.system_get_major_extension_table(
+            c.HSA_EXTENSION_AMD_LOADER,
+            1,
+            @sizeOf(c.hsa_ven_amd_loader_1_03_pfn_t),
+            &loader_api,
+        )) {
+            c.HSA_STATUS_SUCCESS => {},
+            c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable,
+            else => unreachable,
+        }
+
         return .{
             .agent_get_info = api_table.core.agent_get_info,
             .iterate_agents = api_table.core.iterate_agents,
@@ -181,6 +348,7 @@ pub const Instance = struct {
             .amd_memory_pool_allocate = api_table.amd_ext.memory_pool_allocate,
             .amd_memory_pool_free = api_table.amd_ext.memory_pool_free,
             .amd_memory_pool_get_info = api_table.amd_ext.memory_pool_get_info,
+            .amd_loader_query_host_address = loader_api.hsa_ven_amd_loader_query_host_address.?,
         };
     }
 
@@ -504,6 +672,23 @@ pub const Instance = struct {
             c.HSA_STATUS_ERROR_INVALID_MEMORY_POOL => unreachable,
             c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with Attribute
             else => unreachable, // Undocumented error.
+        };
+    }
+
+    pub fn loaderQueryHostAddress(
+        self: *const Instance,
+        comptime T: type,
+        device_addr: *const T,
+    ) *const T {
+        var host_addr: *const T = undefined;
+        return switch (self.amd_loader_query_host_address(
+            device_addr,
+            @ptrCast(*?*const anyopaque, &host_addr),
+        )) {
+            c.HSA_STATUS_SUCCESS => host_addr,
+            c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Invalid `device_addr`
+            else => unreachable, // Undocumented error
         };
     }
 };
