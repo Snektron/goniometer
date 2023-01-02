@@ -83,6 +83,26 @@ fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) vo
     }
 }
 
+fn executableFreeze(exe: hsa.Executable, options: [*c]const u8) callconv(.C) hsa.Status {
+    std.log.debug("executableFreeze {X}", .{exe.handle});
+    _ = profiler.instance.loaderExecutableIterateLoadedCodeObjects(exe, {}, queryCodeObjectsCbk) catch unreachable;
+    return profiler.instance.executable_freeze(exe, options);
+}
+
+fn queryCodeObjectsCbk(context: void, exe: hsa.Executable, co: hsa.LoadedCodeObject) !?void {
+    _ = context;
+    _ = exe;
+    const uri = try profiler.instance.getLoadedCodeObjectUri(co, profiler.a);
+    defer profiler.a.free(uri);
+    std.log.debug("code object uri: {s}", .{uri});
+    return null;
+}
+
+fn executableDestroy(exe: hsa.Executable) callconv(.C) hsa.Status {
+    std.log.debug("executableDestroy {X}", .{exe.handle});
+    return profiler.instance.executable_destroy(exe);
+}
+
 fn loadQueueReadIndex(queue: [*c]const hsa.Queue) callconv(.C) u64 {
     if (profiler.getProfileQueue(queue)) |pq| {
         return @atomicLoad(u64, &pq.read_index, .Monotonic);
@@ -140,6 +160,9 @@ export fn OnLoad(
 
     table.core.signal_store_relaxed = &signalStore;
     table.core.signal_store_screlease = &signalStore;
+
+    table.core.executable_freeze = &executableFreeze;
+    table.core.executable_destroy = &executableDestroy;
 
     // TODO: Override the remaining queue functions, for good measure.
     // TODO: Use the proper atomic ordering.

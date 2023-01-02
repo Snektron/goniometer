@@ -382,7 +382,8 @@ pub fn dispatchKernel(
         hsa.AmdKernelCode,
         @intToPtr(*const hsa.AmdKernelCode, packet.kernel_object),
     );
-    std.log.debug("{}", .{kernel_code});
+    _ = kernel_code;
+    // std.log.debug("{}", .{kernel_code});
 
     self.submit(pq, @ptrCast(*align(hsa.Packet.alignment) const hsa.Packet, packet));
 }
