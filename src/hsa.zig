@@ -17,6 +17,7 @@ pub const Queue = c.hsa_queue_t;
 pub const Signal = c.hsa_signal_t;
 pub const SignalValue = c.hsa_signal_value_t;
 pub const Executable = c.hsa_executable_t;
+pub const Symbol = c.hsa_executable_symbol_t;
 pub const MemoryPool = c.hsa_amd_memory_pool_t;
 pub const KernelDispatchPacket = c.hsa_kernel_dispatch_packet_t;
 pub const LoadedCodeObject = c.hsa_loaded_code_object_t;
@@ -200,6 +201,28 @@ pub const Attribute = enum(c_int) {
     }
 };
 
+pub const SymbolKind = enum(c_int) {
+    variable,
+    kernel,
+    indirect_function,
+};
+
+pub const SymbolAttribute = enum(c_int) {
+    kind = c.HSA_EXECUTABLE_SYMBOL_INFO_TYPE,
+    name_len = c.HSA_EXECUTABLE_SYMBOL_INFO_NAME_LENGTH,
+    name = c.HSA_EXECUTABLE_SYMBOL_INFO_NAME,
+    kernel_object = c.HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_OBJECT,
+
+    pub fn Type(comptime self: SymbolAttribute) type {
+        return switch (self) {
+            .kind => SymbolKind,
+            .name_len => u32,
+            .name => unreachable, // Requires allocation
+            .kernel_object => u64,
+        };
+    }
+};
+
 pub const QueueType32 = enum(u32) {
     multi = c.HSA_QUEUE_TYPE_MULTI,
     single = c.HSA_QUEUE_TYPE_SINGLE,
@@ -248,17 +271,19 @@ pub const LoadedCodeObjectAttribute = enum(c_int) {
     memory_base = c.HSA_VEN_AMD_LOADER_LOADED_CODE_OBJECT_INFO_CODE_OBJECT_STORAGE_MEMORY_BASE,
     memory_size = c.HSA_VEN_AMD_LOADER_LOADED_CODE_OBJECT_INFO_CODE_OBJECT_STORAGE_MEMORY_SIZE,
     storage_file = c.HSA_VEN_AMD_LOADER_LOADED_CODE_OBJECT_INFO_CODE_OBJECT_STORAGE_FILE,
-    uri_length = c.HSA_VEN_AMD_LOADER_LOADED_CODE_OBJECT_INFO_URI_LENGTH,
+    uri_len = c.HSA_VEN_AMD_LOADER_LOADED_CODE_OBJECT_INFO_URI_LENGTH,
     uri = c.HSA_VEN_AMD_LOADER_LOADED_CODE_OBJECT_INFO_URI,
+    load_delta = c.HSA_VEN_AMD_LOADER_LOADED_CODE_OBJECT_INFO_LOAD_DELTA,
 
     pub fn Type(comptime self: LoadedCodeObjectAttribute) type {
         return switch (self) {
             .storage_type => LoadedCodeObjectStorageType,
-            .memory_base => u64,
+            .memory_base => [*]u8,
             .memory_size => u64,
             .storage_file => std.os.fd_t,
-            .uri_length => u32,
+            .uri_len => u32,
             .uri => unreachable, // requires allocation
+            .load_delta => i64,
         };
     }
 };
@@ -335,6 +360,8 @@ pub const Instance = struct {
     signal_wait_scacquire: *const @TypeOf(c.hsa_signal_wait_scacquire),
     executable_freeze: *const @TypeOf(c.hsa_executable_freeze),
     executable_destroy: *const @TypeOf(c.hsa_executable_destroy),
+    executable_iterate_symbols: *const @TypeOf(c.hsa_executable_iterate_symbols),
+    executable_symbol_get_info: *const @TypeOf(c.hsa_executable_symbol_get_info),
 
     /// AMD-specific functionality.
     amd_agent_iterate_memory_pools: *const @TypeOf(c.hsa_amd_agent_iterate_memory_pools),
@@ -342,6 +369,7 @@ pub const Instance = struct {
     amd_memory_pool_allocate: *const @TypeOf(c.hsa_amd_memory_pool_allocate),
     amd_memory_pool_free: *const @TypeOf(c.hsa_amd_memory_pool_free),
     amd_memory_pool_get_info: *const @TypeOf(c.hsa_amd_memory_pool_get_info),
+    amd_profiling_set_profiler_enabled: *const @TypeOf(c.hsa_amd_profiling_set_profiler_enabled),
     amd_loader_query_host_address: *const @TypeOf(c.hsa_ven_amd_loader_query_host_address),
     amd_loader_executable_iterate_loaded_code_objects: *const @TypeOf(c.hsa_ven_amd_loader_executable_iterate_loaded_code_objects),
     amd_loader_loaded_code_object_get_info: *const @TypeOf(c.hsa_ven_amd_loader_loaded_code_object_get_info),
@@ -376,12 +404,15 @@ pub const Instance = struct {
             .signal_wait_scacquire = api_table.core.signal_wait_scacquire,
             .executable_freeze = api_table.core.executable_freeze,
             .executable_destroy = api_table.core.executable_destroy,
+            .executable_iterate_symbols = api_table.core.executable_iterate_symbols,
+            .executable_symbol_get_info = api_table.core.executable_symbol_get_info,
 
             .amd_agent_iterate_memory_pools = api_table.amd_ext.agent_iterate_memory_pools,
             .amd_agents_allow_access = api_table.amd_ext.agents_allow_access,
             .amd_memory_pool_allocate = api_table.amd_ext.memory_pool_allocate,
             .amd_memory_pool_free = api_table.amd_ext.memory_pool_free,
             .amd_memory_pool_get_info = api_table.amd_ext.memory_pool_get_info,
+            .amd_profiling_set_profiler_enabled = api_table.amd_ext.profiling_set_profiler_enabled,
             .amd_loader_query_host_address = loader_api.hsa_ven_amd_loader_query_host_address.?,
             .amd_loader_executable_iterate_loaded_code_objects = loader_api.hsa_ven_amd_loader_executable_iterate_loaded_code_objects.?,
             .amd_loader_loaded_code_object_get_info = loader_api.hsa_ven_amd_loader_loaded_code_object_get_info.?,
@@ -623,6 +654,82 @@ pub const Instance = struct {
         };
     }
 
+    fn IterateSymbols(comptime Context: type, comptime callback: anytype) type {
+        return @TypeOf(callback(@as(Context, undefined), @as(Executable, undefined), @as(Symbol, undefined)));
+    }
+
+    pub fn iterateSymbols(
+        self: *const Instance,
+        exe: Executable,
+        context: anytype,
+        /// should be of type `callback: fn(context: @TypeOf(context), Executable, Symbol) !?T`
+        /// Iteration is interrupted if ?T holds a value.
+        comptime callback: anytype,
+    ) IterateSymbols(@TypeOf(context), callback) {
+        const Context = @TypeOf(context);
+        const Result = IterateSymbols(Context, callback);
+        const S = struct {
+            context: Context,
+            result: Result,
+
+            fn cbk(exe_: Executable, sym: Symbol, data: ?*anyopaque) callconv(.C) Status {
+                const s = @ptrCast(*@This(), @alignCast(@alignOf(@This()), data.?));
+                s.result = callback(s.context, exe_, sym);
+                const result = s.result catch return c.HSA_STATUS_ERROR;
+                if (result != null) {
+                    return c.HSA_STATUS_INFO_BREAK;
+                }
+                return c.HSA_STATUS_SUCCESS;
+            }
+        };
+        var ctx = S{
+            .context = context,
+            .result = undefined,
+        };
+        _ = self.executable_iterate_symbols(exe, S.cbk, &ctx);
+        return ctx.result;
+    }
+
+    pub fn getSymbolInfo(
+        self: *const Instance,
+        sym: Symbol,
+        comptime attribute: SymbolAttribute,
+    ) attribute.Type() {
+        var value: attribute.Type() = undefined;
+        return switch (self.executable_symbol_get_info(
+            sym,
+            @enumToInt(attribute),
+            @ptrCast(*anyopaque, &value),
+        )) {
+            c.HSA_STATUS_SUCCESS => value,
+            c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_AGENT => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_MEMORY_POOL => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with Attribute
+            else => unreachable, // Undocumented error.
+        };
+    }
+
+    pub fn getSymbolName(
+        self: *const Instance,
+        sym: Symbol,
+        allocator: std.mem.Allocator,
+    ) ![]const u8 {
+        const len = self.getSymbolInfo(sym, .name_len);
+        const result = try allocator.alloc(u8, len);
+        return switch (self.executable_symbol_get_info(
+            sym,
+            @enumToInt(SymbolAttribute.name),
+            result.ptr,
+        )) {
+            c.HSA_STATUS_SUCCESS => result,
+            c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_EXECUTABLE => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with Attribute
+            else => unreachable, // Undocumented error.
+        };
+    }
+
     fn IterateMemoryPools(comptime Context: type, comptime callback: anytype) type {
         return @TypeOf(callback(@as(Context, undefined), @as(MemoryPool, undefined)));
     }
@@ -755,7 +862,7 @@ pub const Instance = struct {
         return @TypeOf(callback(@as(Context, undefined), @as(Executable, undefined), @as(LoadedCodeObject, undefined)));
     }
 
-    pub fn loaderExecutableIterateLoadedCodeObjects(
+    pub fn iterateLoadedCodeObjects(
         self: *const Instance,
         exe: Executable,
         context: anytype,
@@ -811,7 +918,7 @@ pub const Instance = struct {
         co: LoadedCodeObject,
         allocator: std.mem.Allocator,
     ) ![]const u8 {
-        const len = self.getLoadedCodeObjectInfo(co, .uri_length);
+        const len = self.getLoadedCodeObjectInfo(co, .uri_len);
         const result = try allocator.alloc(u8, len);
         return switch (self.amd_loader_loaded_code_object_get_info(
             co,

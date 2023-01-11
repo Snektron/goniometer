@@ -56,6 +56,14 @@ fn queueDestroy(queue: [*c]hsa.Queue) callconv(.C) hsa.Status {
     return hsa.c.HSA_STATUS_SUCCESS;
 }
 
+fn queueSetProfingEnabled(queue: [*c]hsa.Queue, enable: c_int) callconv(.C) hsa.Status {
+    if (profiler.getProfileQueue(queue)) |pq| {
+        return profiler.instance.amd_profiling_set_profiler_enabled(pq.backing_queue, enable);
+    } else {
+        return profiler.instance.amd_profiling_set_profiler_enabled(queue, enable);
+    }
+}
+
 fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) void {
     const pq = profiler.queues.get(signal) orelse {
         // No such queue, so this is probably a signal for something else.
@@ -84,22 +92,15 @@ fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) vo
 }
 
 fn executableFreeze(exe: hsa.Executable, options: [*c]const u8) callconv(.C) hsa.Status {
-    std.log.debug("executableFreeze {X}", .{exe.handle});
-    _ = profiler.instance.loaderExecutableIterateLoadedCodeObjects(exe, {}, queryCodeObjectsCbk) catch unreachable;
+    profiler.registerExecutable(exe) catch |err| {
+        std.log.err("failed to register executable: {s}", .{@errorName(err)});
+        return hsa.toStatus(err);
+    };
     return profiler.instance.executable_freeze(exe, options);
 }
 
-fn queryCodeObjectsCbk(context: void, exe: hsa.Executable, co: hsa.LoadedCodeObject) !?void {
-    _ = context;
-    _ = exe;
-    const uri = try profiler.instance.getLoadedCodeObjectUri(co, profiler.a);
-    defer profiler.a.free(uri);
-    std.log.debug("code object uri: {s}", .{uri});
-    return null;
-}
-
 fn executableDestroy(exe: hsa.Executable) callconv(.C) hsa.Status {
-    std.log.debug("executableDestroy {X}", .{exe.handle});
+    profiler.unregisterExecutable(exe);
     return profiler.instance.executable_destroy(exe);
 }
 
@@ -155,8 +156,11 @@ export fn OnLoad(
         return false;
     };
 
+    // TODO: Override the remaining queue functions, for good measure.
+
     table.core.queue_create = &queueCreate;
     table.core.queue_destroy = &queueDestroy;
+    table.amd_ext.profiling_set_profiler_enabled = &queueSetProfingEnabled;
 
     table.core.signal_store_relaxed = &signalStore;
     table.core.signal_store_screlease = &signalStore;
@@ -164,7 +168,6 @@ export fn OnLoad(
     table.core.executable_freeze = &executableFreeze;
     table.core.executable_destroy = &executableDestroy;
 
-    // TODO: Override the remaining queue functions, for good measure.
     // TODO: Use the proper atomic ordering.
     table.core.queue_load_read_index_relaxed = &loadQueueReadIndex;
     table.core.queue_load_read_index_scacquire = &loadQueueReadIndex;
@@ -182,3 +185,15 @@ export fn OnLoad(
 
     return true;
 }
+
+export fn OnUnload() callconv(.C) void {
+    std.log.info("shutting down", .{});
+    profiler.save("dump") catch |err| {
+        std.log.err("failed to save trace: {s}", .{@errorName(err)});
+    };
+    profiler.deinit();
+}
+
+/// HSA does not call OnUnload() properly, so we just hack it in using the shared library destructor.
+// TODO: Make sure that the profiler is not created/destroyed twice?
+export const fini linksection(".fini_array") = &OnUnload;

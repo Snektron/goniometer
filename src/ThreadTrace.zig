@@ -126,17 +126,17 @@ pub fn init(
     const output_buffer = try instance.memoryPoolAllocate(
         u8,
         cpu_pool,
-        threadTraceBufferSize(agent_info.shader_engines, thread_trace_buffer_size),
+        threadTraceBufferSize(agent_info.properties.shader_engines, thread_trace_buffer_size),
     );
     std.mem.set(u8, output_buffer, 0);
     errdefer instance.memoryPoolFree(output_buffer);
     instance.agentsAllowAccess(output_buffer.ptr, &.{agent_info.agent});
 
-    const start_ib = try startCommands(instance, cpu_pool, agent_info.shader_engines, output_buffer);
+    const start_ib = try startCommands(instance, cpu_pool, agent_info.properties.shader_engines, output_buffer);
     errdefer instance.memoryPoolFree(start_ib);
     instance.agentsAllowAccess(start_ib.ptr, &.{agent_info.agent});
 
-    const stop_ib = try stopCommands(instance, cpu_pool, agent_info.shader_engines, output_buffer);
+    const stop_ib = try stopCommands(instance, cpu_pool, agent_info.properties.shader_engines, output_buffer);
     errdefer instance.memoryPoolFree(stop_ib);
     instance.agentsAllowAccess(stop_ib.ptr, &.{agent_info.agent});
 
@@ -189,6 +189,39 @@ fn startCommands(
     const shifted_size = @shrExact(thread_trace_buffer_size, sqtt_buffer_align_shift);
     const output_va = @ptrToInt(output_buffer.ptr);
 
+    // wait until the queue is idle
+    cmdbuf.cacheFlush(.{
+        .icache = true,
+        .scache = true,
+        .vcache = true,
+        .l2 = true,
+        .cs_partial_flush = true,
+    });
+
+    cmdbuf.setUConfigReg(.rlc_perfmon_clock_cntl, .{
+        .inhibit_clock = true,
+    });
+
+    cmdbuf.setUConfigReg(.spi_config_cntl, .{
+        .gpr_write_priority = 0x2c688,
+        .exp_priority_order = 3,
+        .enable_sqg_top_events = true,
+        .enable_sqg_bop_events = true,
+        .rsrc_mgmt_reset = false,
+        .ttrace_stall_all = false,
+        .alloc_arb_lru_ena = false,
+        .exp_arb_lru_ena = false,
+        .ps_pkr_priority_cntl = 3,
+    });
+
+    // reset counters
+    cmdbuf.setUConfigReg(.cp_perfmon_cntl, .{
+        .perfmon_state = .disable_and_reset,
+        .spm_perfmon_state = .disable_and_reset,
+        .enable_mode = .always_count,
+        .sample_enable = false,
+    });
+
     // TODO: mesa only enables thread trace for shader engines/compute units which are enabled.
     // We may be able to query that information with hsa_amd_queue_cu_get_mask, but its not
     // terribly clear on documentation so just skip that for now.
@@ -211,7 +244,7 @@ fn startCommands(
             .se_broadcast_writes = false,
         });
 
-        // Assume gfx >= 10
+        // Assume gfx1030
         // Note: order is apparently important for the following 2 registers.
         cmdbuf.setPrivilegedConfigReg(.sqtt_buf0_size, .{
             .size = @intCast(u24, shifted_size),
@@ -253,7 +286,7 @@ fn startCommands(
             .reg_stall_en = true,
             .spi_stall_en = true,
             .sq_stall_en = true,
-            .reg_drop_on_stall = true,
+            .reg_drop_on_stall = false,
             .lowater_offset = 4, // Note: gfx10 specific
             .auto_flush_mode = true, // Required for a gfx10 specific bug
         });
@@ -287,6 +320,15 @@ fn stopCommands(
     var cmdbuf = try CmdBuf.alloc(instance, cpu_pool, stop_cmd_size);
     errdefer cmdbuf.free(instance);
 
+    // Wait-for-idle before ending thread trace.
+    cmdbuf.cacheFlush(.{
+        .icache = true,
+        .scache = true,
+        .vcache = true,
+        .l2 = true,
+        .cs_partial_flush = true,
+    });
+
     cmdbuf.setShReg(.compute_thread_trace_enable, .{
         .enable = false,
     });
@@ -305,22 +347,18 @@ fn stopCommands(
         });
 
         const sqtt_status = pm4.PrivilegedRegister.sqtt_status;
-        // _ = output_buffer;
-        // _ = sqtt_status;
 
-        // TODO: This hangs, but doesnt seem to prevent anything from appearing in the output...
-        // Poll the status register to ensure that the thread trace has finished writing.
-        // cmdbuf.waitRegMem(.{
-        //     .function = .ne,
-        //     .mem_space = .register,
-        //     .engine = .me,
-        //     .poll_addr = sqtt_status.address(),
-        //     .reference = 0,
-        //     .mask = @bitCast(u32, sqtt_status.Type(){
-        //         .finish_done = std.math.maxInt(u12),
-        //     }),
-        //     .poll_interval = 4,
-        // });
+        cmdbuf.waitRegMem(.{
+            .function = .ne,
+            .mem_space = .register,
+            .engine = .me,
+            .poll_addr = sqtt_status.address(),
+            .reference = 0,
+            .mask = @bitCast(u32, sqtt_status.Type(){
+                .finish_done = std.math.maxInt(u12),
+            }),
+            .poll_interval = 4,
+        });
 
         // Stop tracing
         cmdbuf.setPrivilegedConfigReg(.sqtt_ctrl, .{
@@ -332,7 +370,7 @@ fn stopCommands(
             .reg_stall_en = true,
             .spi_stall_en = true,
             .sq_stall_en = true,
-            .reg_drop_on_stall = true,
+            .reg_drop_on_stall = false,
             .lowater_offset = 4, // Note: gfx10 specific
             .auto_flush_mode = true, // Required for a gfx10 specific bug
         });
@@ -385,16 +423,35 @@ fn stopCommands(
         .se_broadcast_writes = true,
     });
 
+    cmdbuf.setUConfigReg(.spi_config_cntl, .{
+        .gpr_write_priority = 0x2c688,
+        .exp_priority_order = 3,
+        .enable_sqg_top_events = true,
+        .enable_sqg_bop_events = true,
+        .rsrc_mgmt_reset = false,
+        .ttrace_stall_all = false,
+        .alloc_arb_lru_ena = false,
+        .exp_arb_lru_ena = false,
+        .ps_pkr_priority_cntl = 3,
+    });
+
+    // TODO: Find out previous state
+    cmdbuf.setUConfigReg(.rlc_perfmon_clock_cntl, .{
+        .inhibit_clock = false,
+    });
+
     return cmdbuf.words();
 }
 
 /// Fetches the trace information from the GPU. `agent_info` must be the
-/// the same as that passed to `init`. Traces will be added to `out`, and
-/// each trace must be deinitialized using `a`.
-pub fn read(self: *Self, out: *std.ArrayList(Trace), a: Allocator, agent_info: AgentInfo) !void {
-    const shader_engines = agent_info.shader_engines;
+/// the same as that passed to `init`. The returned traces must be deinitialized
+/// using `deinit(a)`.
+pub fn read(self: *Self, a: Allocator, agent_info: AgentInfo) ![]Trace {
+    const shader_engines = agent_info.properties.shader_engines;
     const output_va = @ptrToInt(self.output_buffer.ptr);
     var shader_engine: u32 = 0;
+    var traces = std.ArrayList(Trace).init(a);
+    defer traces.deinit();
     while (shader_engine < shader_engines) : (shader_engine += 1) {
         // Note: logic for selecting SEs and CUs to use should be kept the same as in startCommands.
         const info_va = output_va + threadTraceInfoOffset(shader_engine);
@@ -405,11 +462,13 @@ pub fn read(self: *Self, out: *std.ArrayList(Trace), a: Allocator, agent_info: A
         const info = @intToPtr(*const ThreadTraceInfo, info_va);
         const data = @intToPtr([*]const u8, data_va)[0 .. info.cur_offset * 32];
 
-        try out.append(.{
+        try traces.append(.{
             .info = info.*,
             .data = try a.dupe(u8, data),
             .shader_engine = shader_engine,
             .compute_unit = first_active_cu,
         });
     }
+
+    return try traces.toOwnedSlice();
 }

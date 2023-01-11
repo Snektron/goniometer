@@ -1,8 +1,10 @@
 const Profiler = @This();
 
 const std = @import("std");
+const elf = @import("elf.zig");
 const hsa = @import("hsa.zig");
 const rgp = @import("rgp.zig");
+const pm4 = @import("pm4.zig");
 const ThreadTrace = @import("ThreadTrace.zig");
 
 const stop_trace_signal_timeout_ns = std.time.ns_per_s * 10;
@@ -38,11 +40,14 @@ pub const ProfileQueue = struct {
 };
 
 /// Meta-information tho avoid having it to query all the time.
+/// This structure also contains information that we need to know when writing the RGP trace,
+/// because that may happen at a moment that HSA is no longer initialized.
 pub const AgentInfo = struct {
     /// The AMD architecture level. This value is the architecture in hexadecimal (eg, 0x1030 for gfx1030).
     /// If this is not applicable for the current agent, its .not_applicable.
     pub const GcnArch = enum(u32) {
-        not_applicable = 0,
+        /// The device did not report a valid GCN arch.
+        invalid = 0,
         // Common ones can be added here, for utility.
         gfx1030 = 0x1030,
         _,
@@ -56,19 +61,40 @@ pub const AgentInfo = struct {
         }
     };
 
+    /// Properties that are only valid for GPU agents.
+    pub const GpuProperties = struct {
+        gcn_arch: GcnArch,
+        memory_freq: u32,
+        memory_width: u32,
+    };
+
+    /// Agent properties that are required when dumping the RGP capture,
+    /// as we cannot be sure that the agent is still alive by then.
+    /// Note: this struct can also contain information from HSA_AMD_AGENT_INFO
+    /// queries. Sometimes those just return an equivalent property, but when they
+    /// crash, they should be added to `GpuProperties`.
+    pub const Properties = struct {
+        name: [64]u8,
+        agent_type: hsa.DeviceType,
+        shader_engines: u32,
+        vendor_name: [64]u8,
+        product_name: [64]u8,
+        compute_units: u32,
+        simds_per_cu: u32,
+        cache_size: [4]u32,
+        clock_freq: u32,
+        timestamp_freq: u64,
+        chip_id: u32,
+        asic_revision: u32,
+        gpu_properties: ?GpuProperties,
+    };
+
     /// The agent that this information concerns. Will be used as key for the `agents` map.
     agent: hsa.Agent,
-    /// Name of agent, zero-terminated (max 63 chars).
-    name: [64]u8,
-    /// The type of the agent. Thread traces will only be valid for queues created for a gpu agent.
-    agent_type: hsa.DeviceType,
     /// The primary (device-local) pool to allocate memory from for this agent.
     primary_pool: hsa.MemoryPool,
-    /// The number of shader engines that this agent has. This is here so that we
-    /// dont have to query it all the time.
-    shader_engines: u32,
-    /// The agent's GCN architecture level. If this is a cpu agent, this is .not_applicable.
-    gcn_arch: GcnArch,
+    /// Agent properties
+    properties: Properties,
 
     pub const HashContext = struct {
         pub fn hash(self: @This(), agent_info: AgentInfo) u32 {
@@ -97,6 +123,25 @@ pub const AgentInfo = struct {
     };
 };
 
+/// Meta-information associated with a kernel.
+pub const KernelInfo = struct {
+    /// Name of the kernel descriptor symbol. Allocation is owned.
+    /// This name is of form <name>.kd, so to get the neat name the
+    /// suffix must be stripped.
+    descriptor_name: []const u8,
+
+    /// Get the proper kernel name, without the descriptor suffix.
+    fn name(self: KernelInfo) []const u8 {
+        return self.descriptor_name[0 .. self.descriptor_name.len - 3];
+    }
+};
+
+/// This structure models an agent's complete tracing session,
+/// along with sqtt traces, events, etc.
+pub const Session = struct {
+    traces: std.ArrayListUnmanaged(ThreadTrace.Trace) = .{},
+};
+
 /// The allocator to use for profiling data.
 a: std.mem.Allocator,
 /// The HSA instance that we call into.
@@ -109,6 +154,16 @@ cpu_agent: u32,
 /// A map of queue handles to queue proxy queues. A queue is identified by its doorbell signal.
 /// TODO: we can get rid of the duplicate signal handle by using a context.
 queues: std.AutoArrayHashMapUnmanaged(hsa.Signal, *ProfileQueue) = .{},
+/// A map of loaded kernels, indexed by kernel code handle.
+kernels: std.AutoArrayHashMapUnmanaged(u64, KernelInfo) = .{},
+/// A list of tracing sessions. Currently, we just have one
+/// global session for every agent. This array list is indexed
+/// by the same index that the agent has in `agents`.
+sessions: std.ArrayListUnmanaged(Session) = .{},
+/// Code object load events. These are common for all agents, and are regardless of session.
+load_events: std.ArrayListUnmanaged(rgp.Capture.LoadEvent) = .{},
+/// The actual code objects that were encountered. The binary is owned by self.a.
+code_objects: std.ArrayListUnmanaged(rgp.Capture.CodeObject) = .{},
 
 pub fn init(a: std.mem.Allocator, api_table: *const hsa.ApiTable) !Profiler {
     var self = Profiler{
@@ -121,20 +176,47 @@ pub fn init(a: std.mem.Allocator, api_table: *const hsa.ApiTable) !Profiler {
 }
 
 pub fn deinit(self: *Profiler) void {
-    // for (self.queues.items()) |pq| {
-    //     pq.trace.deinit(self.a);
-    // }
+    for (self.queues.values()) |pq| {
+        pq.thread_trace.deinit(&self.instance);
+    }
+
+    for (self.kernels.values()) |info| {
+        self.a.free(info.descriptor_name);
+    }
+
+    for (self.sessions.items) |*session| {
+        for (session.traces.items) |*trace| {
+            trace.deinit(self.a);
+        }
+        session.traces.deinit(self.a);
+    }
+
+    for (self.code_objects.items) |code_object| {
+        self.a.free(code_object.elf_binary);
+    }
 
     self.agents.deinit(self.a);
     self.queues.deinit(self.a);
+    self.kernels.deinit(self.a);
+    self.sessions.deinit(self.a);
+    self.load_events.deinit(self.a);
+    self.code_objects.deinit(self.a);
     self.* = undefined;
 }
 
 fn queryAgents(self: *Profiler) !void {
     _ = try self.instance.iterateAgents(self, queryAgentsCbk);
 
+    // Make sure that the sessions array always has the same size as the agents
+    // list.
+    if (self.sessions.items.len < self.agents.count()) {
+        const prev_len = self.sessions.items.len;
+        try self.sessions.resize(self.a, self.agents.count());
+        for (self.sessions.items[prev_len..]) |*session| session.* = .{};
+    }
+
     self.cpu_agent = for (self.agents.keys()) |info, i| {
-        if (info.agent_type == .cpu)
+        if (info.properties.agent_type == .cpu)
             break @intCast(u32, i);
     } else {
         std.log.err("system has no cpu agent", .{});
@@ -146,36 +228,57 @@ fn queryAgentsCbk(self: *Profiler, agent: hsa.Agent) !?void {
     const result = self.agents.getOrPut(self.a, AgentInfo{
         .agent = agent,
         // Fields are filled in momentarily.
-        .name = undefined,
-        .agent_type = undefined,
         .primary_pool = undefined,
-        .shader_engines = undefined,
-        .gcn_arch = .not_applicable,
+        .properties = undefined,
     }) catch return error.OutOfResources;
     std.debug.assert(!result.found_existing); // bug in HSA: the same agent is reported twice.
     const info = result.key_ptr;
 
-    info.name = self.instance.getAgentInfo(agent, .name);
-    info.agent_type = self.instance.getAgentInfo(agent, .device_type);
-    info.shader_engines = self.instance.getAgentInfo(agent, .num_shader_engines);
+    info.properties = .{
+        .name = self.instance.getAgentInfo(agent, .name),
+        .agent_type = self.instance.getAgentInfo(agent, .device_type),
+        .shader_engines = self.instance.getAgentInfo(agent, .num_shader_engines),
+        .vendor_name = self.instance.getAgentInfo(agent, .vendor_name),
+        .product_name = self.instance.getAgentInfo(agent, .product_name),
+        .compute_units = self.instance.getAgentInfo(agent, .num_compute_units),
+        .simds_per_cu = self.instance.getAgentInfo(agent, .num_simds_per_cu),
+        .cache_size = self.instance.getAgentInfo(agent, .cache_size),
+        .clock_freq = self.instance.getAgentInfo(agent, .max_clock_freq),
+        .chip_id = self.instance.getAgentInfo(agent, .chip_id),
+        .asic_revision = self.instance.getAgentInfo(agent, .asic_revision),
+        .timestamp_freq = self.instance.getAgentInfo(agent, .timestamp_freq),
+        .gpu_properties = null,
+    };
 
-    const name = std.mem.sliceTo(&info.name, 0);
-    const type_str = switch (info.agent_type) {
+    const name = std.mem.sliceTo(&info.properties.name, 0);
+    const type_str = switch (info.properties.agent_type) {
         .cpu => "cpu",
         .gpu => "gpu",
         _ => "other",
     };
     std.log.info("found device '{s}' of type {s}", .{ name, type_str });
 
-    if (std.mem.startsWith(u8, name, "gfx")) {
-        // Try to parse the remainder as gfx architecture level. These are in the form
-        // `gfxX` where X are 3 or 4 hexadecimal chars. We're just going to cheat and
-        // interpret the rest of the string as hex.
-        if (std.fmt.parseInt(u32, name[3..], 16)) |arch_level| {
-            info.gcn_arch = @intToEnum(AgentInfo.GcnArch, arch_level);
-        } else |_| {
-            std.log.warn("could not parse gfx-like device name '{s}' as gcn arch level", .{name});
-        }
+    if (info.properties.agent_type == .gpu) {
+        const gcn_arch = if (std.mem.startsWith(u8, name, "gfx")) blk: {
+            // Try to parse the remainder as gfx architecture level. These are in the form
+            // `gfxX` where X are 3 or 4 hexadecimal chars. We're just going to cheat and
+            // interpret the rest of the string as hex.
+            if (std.fmt.parseInt(u32, name[3..], 16)) |arch_level| {
+                break :blk @intToEnum(AgentInfo.GcnArch, arch_level);
+            } else |_| {
+                std.log.err("could not parse gfx-like device name '{s}' as gcn arch level", .{name});
+                break :blk .invalid;
+            }
+        } else blk: {
+            std.log.err("GPU device does not have gfx-like device name (its '{s}'), could not determine gcn level", .{name});
+            break :blk .invalid;
+        };
+
+        info.properties.gpu_properties = .{
+            .gcn_arch = gcn_arch,
+            .memory_freq = self.instance.getAgentInfo(agent, .max_memory_freq),
+            .memory_width = self.instance.getAgentInfo(agent, .memory_width),
+        };
     }
 
     info.primary_pool = (try self.instance.iterateMemoryPools(agent, self, queryAgentPoolsCbk)) orelse {
@@ -320,6 +423,16 @@ pub fn startTrace(self: *Profiler, pq: *ProfileQueue) void {
     // TODO: Find out what we need to bring over. For now, we only target GFX10
     // and the stuff from radv_emit_thread_trace_start.
     std.log.info("starting kernel trace", .{});
+
+    // const c = @cImport({
+    //     @cInclude("hsa/hsa_ven_amd_aqlprofile.h");
+    // });
+
+    var dl = std.DynLib.open("/opt/rocm-5.3.0/lib/libhsa-amd-aqlprofile64.so.1.0.50300") catch unreachable;
+    defer dl.close();
+    const start = dl.lookup(*const @TypeOf(hsa.c.hsa_ven_amd_aqlprofile_start), "hsa_ven_amd_aqlprofile_start").?;
+    _ = start;
+
     self.submit(pq, pq.thread_trace.start_packet.asHsaPacket());
 }
 
@@ -346,27 +459,15 @@ pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) !void {
     }
     self.instance.signalStore(pq.thread_trace.stop_packet.completion_signal, 1, .Monotonic);
 
-    const cpu_agent_info = self.agents.keys()[self.cpu_agent];
+    // const cpu_agent_info = self.agents.keys()[self.cpu_agent];
     const gpu_agent_info = self.agents.keys()[pq.agent];
+    const traces = try pq.thread_trace.read(self.a, gpu_agent_info);
+    defer self.a.free(traces); // Note: only the array must be freed, traces are moved.
 
-    var traces = std.ArrayList(ThreadTrace.Trace).init(self.a);
-    defer {
-        for (traces.items) |*trace| {
-            trace.deinit(self.a);
-        }
-        traces.deinit();
-    }
-    try pq.thread_trace.read(&traces, self.a, gpu_agent_info);
-
-    rgp.dumpCapture(
-        "dump.rgp",
-        &self.instance,
-        cpu_agent_info,
-        gpu_agent_info,
-        traces.items,
-    ) catch |err| {
-        std.log.err("failed to save capture: {s}", .{@errorName(err)});
-        return error.Save;
+    const session = &self.sessions.items[pq.agent];
+    session.traces.appendSlice(self.a, traces) catch |err| {
+        for (traces) |*trace| trace.deinit(self.a);
+        return err;
     };
 }
 
@@ -385,5 +486,124 @@ pub fn dispatchKernel(
     _ = kernel_code;
     // std.log.debug("{}", .{kernel_code});
 
+    // There is no real pipeline bind moment in hsa so we will just use the dispatch moment
+
     self.submit(pq, @ptrCast(*align(hsa.Packet.alignment) const hsa.Packet, packet));
+}
+
+/// Track meta-information about an HSA executable. Should be called when
+/// the executable is frozen.
+pub fn registerExecutable(self: *Profiler, exe: hsa.Executable) !void {
+    const code_object = (try self.instance.iterateLoadedCodeObjects(exe, self, registerExecutableCodeObjectCbk)) orelse {
+        std.log.err("executable 0x{x} has no code object", .{exe.handle});
+        return;
+    };
+
+    const uri = try self.instance.getLoadedCodeObjectUri(code_object, self.a);
+    defer self.a.free(uri);
+
+    std.log.debug("registering executable with code object '{s}'", .{uri});
+
+    const storage_type = self.instance.getLoadedCodeObjectInfo(code_object, .storage_type);
+    const binary = switch (storage_type) {
+        .memory => blk: {
+            const ptr = self.instance.getLoadedCodeObjectInfo(code_object, .memory_base);
+            const len = self.instance.getLoadedCodeObjectInfo(code_object, .memory_size);
+            const binary = try self.a.alignedAlloc(u8, elf.alignment, len);
+            std.mem.copy(u8, binary, ptr[0..len]);
+            break :blk binary;
+        },
+        else => {
+            std.log.warn("cannot load code object '{s}'", .{uri});
+            return error.Generic;
+        },
+    };
+    self.code_objects.append(self.a, .{
+        .elf_binary = binary,
+    }) catch |err| {
+        self.a.free(binary); // Manually destroy on error to avoid double free.
+        return err;
+    };
+
+    const text_va = elf.getSectionVirtualAddr(binary, ".text") catch return error.Generic;
+    const load_delta = self.instance.getLoadedCodeObjectInfo(code_object, .load_delta);
+
+    try self.load_events.append(self.a, .{
+        .event_type = .load_to_gpu_memory,
+        .base_address = text_va +% @bitCast(u64, load_delta),
+        .code_object_hash = 0, // TODO
+        .timestamp = 0, // TODO
+    });
+
+    // std.log.debug(".text va: 0x{X}, delta: 0x{X}, loaded .text va: 0x{X}", .{text_va, load_delta, real_text_va});
+
+    _ = try self.instance.iterateSymbols(exe, self, registerExecutableSymbolsCbk);
+}
+
+fn registerExecutableCodeObjectCbk(self: *Profiler, exe: hsa.Executable, co: hsa.LoadedCodeObject) !?hsa.LoadedCodeObject {
+    // ROCclr always registers only a single code object, so it seems
+    // find to just return the one binary.
+    _ = exe;
+    _ = self;
+    return co;
+}
+
+fn registerExecutableSymbolsCbk(self: *Profiler, exe: hsa.Executable, sym: hsa.Symbol) !?void {
+    _ = exe;
+    const kind = self.instance.getSymbolInfo(sym, .kind);
+    if (kind != .kernel)
+        return null; // We don't care about non-kernels.
+
+    const kernel_object = self.instance.getSymbolInfo(sym, .kernel_object);
+    const result = try self.kernels.getOrPut(self.a, kernel_object);
+    if (result.found_existing)
+        return null; // Avoid re-registering.
+
+    const name = try self.instance.getSymbolName(sym, self.a);
+    errdefer self.a.free(name);
+
+    std.debug.assert(std.mem.endsWith(u8, name, ".kd")); // Malformed kernel symbol name.
+
+    result.value_ptr.* = .{
+        .descriptor_name = name,
+    };
+
+    return null;
+}
+
+/// Un-track meta-information about an HSA executable. Should be called when the executable
+/// is destroyed.
+pub fn unregisterExecutable(self: *Profiler, exe: hsa.Executable) void {
+    _ = self;
+    _ = exe;
+}
+
+/// Save the current profiling information as an RGP trace.
+/// `basename` is the capture's basename. It will be saved as `basename-<gpu-index>.rgp`.
+/// `gpu-index` does NOT correlate to anything.
+// TODO: Make cycle profiler have consistent GPU indices, and only profile specified
+// GPUs or something.
+pub fn save(self: *Profiler, basename: []const u8) !void {
+    const cpu_agent_info = self.agents.keys()[self.cpu_agent];
+
+    for (self.sessions.items) |session, agent_index| {
+        const gpu_agent_info = self.agents.keys()[agent_index];
+        if (gpu_agent_info.properties.agent_type != .gpu)
+            continue; // TODO: Can RGP trace CPU stuff? I doubt it, plus who uses HSA for CPUs anyway.
+        if (session.traces.items.len == 0)
+            continue; // No point in dumping an empty trace.
+
+        const capture = rgp.Capture{
+            .cpu_agent = &cpu_agent_info,
+            .gpu_agent = &gpu_agent_info,
+            .traces = session.traces.items,
+            .load_events = self.load_events.items,
+            .code_objects = self.code_objects.items,
+        };
+
+        const filename = try std.fmt.allocPrint(self.a, "{s}-{}.rgp", .{ basename, agent_index });
+        defer self.a.free(filename);
+        try capture.dump(filename);
+        std.log.info("saved capture to '{s}'", .{filename});
+    }
 }

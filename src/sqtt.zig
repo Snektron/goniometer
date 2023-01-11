@@ -29,19 +29,19 @@ pub const FileHeader = extern struct {
 
 pub const ChunkHeader = extern struct {
     pub const Type = enum(u8) {
-        asic_info,
-        sqtt_desc,
-        sqtt_data,
-        api_info,
-        reserved,
-        queue_event_timings,
-        clock_calibration,
-        cpu_info,
-        spm_db,
-        code_object_database,
-        code_object_loader_events,
-        pso_correlation,
-        instrumentation_table,
+        asic_info = 0,
+        sqtt_desc = 1,
+        sqtt_data = 2,
+        api_info = 3,
+        reserved = 4,
+        queue_event_timings = 5,
+        clock_calibration = 6,
+        cpu_info = 7,
+        spm_db = 8,
+        code_object_database = 9,
+        code_object_loader_events = 0xA,
+        pso_correlation = 0xB,
+        instrumentation_table = 0xC,
     };
 
     pub const Id = packed struct(u32) {
@@ -240,4 +240,51 @@ pub const SqttData = extern struct {
     header: ChunkHeader,
     offset: i32,
     size: u32,
+};
+
+pub const CodeObjectDatabase = extern struct {
+    pub const Record = extern struct {
+        record_size: u32,
+    };
+
+    header: ChunkHeader,
+    offset: u32,
+    flags: u32,
+    size: u32,
+    record_count: u32,
+};
+
+pub const ObjectLoaderEvents = extern struct {
+    pub const EventType = enum(c_int) {
+        load_to_gpu_memory = 0x0,
+        unload_from_gpu_memory = 0x1,
+    };
+
+    pub const Record = extern struct {
+        event_type: EventType,
+        _reserved: u32 = 0,
+        base_address: u64,
+        code_object_hash: [2]u64,
+        timestamp: u64,
+    };
+
+    header: ChunkHeader,
+    offset: u32,
+    flags: u32,
+    record_size: u32,
+    record_count: u32,
+};
+
+pub const PsoCorrelation = extern struct {
+    pub const Record = extern struct {
+        api_pso_hash: u64,
+        internal_pipeline_hash: [2]u64,
+        api_object_name: [64]u8,
+    };
+
+    header: ChunkHeader,
+    offset: u32,
+    flags: u32,
+    record_size: u32,
+    record_count: u32,
 };

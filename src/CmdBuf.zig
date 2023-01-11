@@ -144,3 +144,46 @@ pub fn indirectBuffer(self: *Self, buf: []const pm4.Word) void {
     };
     self.pkt3(.indirect_buffer, .{}, asWords(&ib));
 }
+
+pub const FlushFlags = packed struct {
+    icache: bool = false,
+    scache: bool = false,
+    vcache: bool = false,
+    l2: bool = false,
+    cs_partial_flush: bool = false,
+};
+
+pub fn cacheFlush(self: *Self, flags: FlushFlags) void {
+    var grc = @bitCast(pm4.AcquireMem.GcrCntl, @as(u32, 0));
+
+    if (flags.icache) {
+        grc.gli_inv = .all;
+    }
+    if (flags.scache) {
+        grc.gl1_inv = true;
+        grc.glk_inv = true;
+    }
+    if (flags.vcache) {
+        grc.gl1_inv = true;
+        grc.glv_inv = true;
+    }
+    if (flags.l2) {
+        grc.gl2_inv = true;
+        grc.gl2_wb = true;
+        grc.glm_inv = true;
+        grc.glm_wb = true;
+    }
+
+    if (flags.cs_partial_flush) {
+        self.writeEventNonSample(.cs_partial_flush, 4);
+    }
+
+    const acquire = pm4.AcquireMem{
+        .coher_cntl = 0,
+        .coher_size = 0xffff_ffff,
+        .coher_base = 0xff_ffff,
+        .poll_interval = 0xa,
+        .gcr_cntl = grc,
+    };
+    self.pkt3(.acquire_mem, .{}, asWords(&acquire));
+}

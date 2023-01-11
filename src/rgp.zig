@@ -42,35 +42,30 @@ fn chunkHeader(chunk_type: sqtt.ChunkHeader.Type, size: u32, ver_major: u16, ver
     };
 }
 
-fn cpuInfo(instance: *const hsa.Instance, agent_info: AgentInfo) sqtt.CpuInfo {
-    const agent = agent_info.agent;
+fn cpuInfo(agent: AgentInfo) sqtt.CpuInfo {
+    const props = agent.properties;
     // Note: mesa reports the name from /proc/cpuinfo, while this will return something like 'CPU'.
-    const vendor_name = instance.getAgentInfo(agent, .vendor_name);
-    const product_name = instance.getAgentInfo(agent, .product_name);
     // TODO: Fill in the remaining attributes.
     return .{
         .header = chunkHeader(.cpu_info, @sizeOf(sqtt.CpuInfo), 0, 0),
-        .vendor_id = vendor_name[0..12].*,
-        .processor_brand = product_name[0..48].*,
-        .cpu_timestamp_freq = instance.getAgentInfo(agent, .timestamp_freq),
-        .clock_speed = instance.getAgentInfo(agent, .max_clock_freq),
+        .vendor_id = props.vendor_name[0..12].*,
+        .processor_brand = props.product_name[0..48].*,
+        .cpu_timestamp_freq = props.timestamp_freq,
+        .clock_speed = props.clock_freq,
         .num_logical_cores = 0,
         .num_physical_cores = 0,
         .system_ram_size = 0,
     };
 }
 
-fn asicInfo(instance: *const hsa.Instance, agent_info: AgentInfo) sqtt.AsicInfo {
+fn asicInfo(agent: AgentInfo) sqtt.AsicInfo {
+    const props = agent.properties;
+    const gpu_props = props.gpu_properties.?;
     // The assignment of these fields is mostly either based on mesa, just a random guess,
     // or hardcoded for GFX1030 (v620).
     // TODO is to revise this function and add the required fields.
-    const agent = agent_info.agent;
-    const compute_units = instance.getAgentInfo(agent, .num_compute_units);
-    const simds_per_cu = instance.getAgentInfo(agent, .num_simds_per_cu);
-    const cache_size = instance.getAgentInfo(agent, .cache_size);
-    const clock_freq = @as(u64, instance.getAgentInfo(agent, .max_clock_freq)) * 1000_000;
-    const mem_freq = @as(u64, instance.getAgentInfo(agent, .max_memory_freq)) * 1000_000;
-    _ = @TypeOf(simds_per_cu);
+    const clock_freq = @as(u64, props.clock_freq) * 1000_000;
+    const mem_freq = @as(u64, gpu_props.memory_freq) * 1000_000;
     return sqtt.AsicInfo{
         .header = chunkHeader(.asic_info, @sizeOf(sqtt.AsicInfo), 0, 4),
         .flags = .{
@@ -79,13 +74,13 @@ fn asicInfo(instance: *const hsa.Instance, agent_info: AgentInfo) sqtt.AsicInfo 
         },
         .trace_shader_core_clock = clock_freq,
         .trace_memory_clock = mem_freq,
-        .device_id = instance.getAgentInfo(agent, .chip_id),
-        .device_revision_id = instance.getAgentInfo(agent, .asic_revision),
+        .device_id = props.chip_id,
+        .device_revision_id = props.asic_revision,
         .vgprs_per_simd = 512 * 2,
         .sgprs_per_simd = 16 * 128,
-        .shader_engines = agent_info.shader_engines,
-        .compute_units_per_shader_engine = compute_units / agent_info.shader_engines,
-        .simds_per_compute_unit = simds_per_cu,
+        .shader_engines = props.shader_engines,
+        .compute_units_per_shader_engine = props.compute_units / props.shader_engines,
+        .simds_per_compute_unit = props.simds_per_cu,
         .wavefronts_per_simd = 20, // Note: .max_waves_per_cu / simds_per_cu is incorrect here.
         .minimum_vgpr_alloc = 4,
         .vgpr_alloc_granularity = 8,
@@ -93,16 +88,16 @@ fn asicInfo(instance: *const hsa.Instance, agent_info: AgentInfo) sqtt.AsicInfo 
         .sgpr_alloc_granularity = 128,
         .hardware_contexts = 8,
         .gpu_type = .discrete,
-        .gfxip_level = switch (agent_info.gcn_arch.major()) {
+        .gfxip_level = switch (gpu_props.gcn_arch.major()) {
             0x6 => .gfxip_6,
             0x7 => .gfxip_7,
-            0x8 => switch (agent_info.gcn_arch.minor()) {
+            0x8 => switch (gpu_props.gcn_arch.minor()) {
                 0 => .gfxip_8,
                 1 => .gfxip_8_1,
                 else => .none,
             },
             0x9 => .gfxip_9,
-            0x10 => switch (agent_info.gcn_arch.minor()) {
+            0x10 => switch (gpu_props.gcn_arch.minor()) {
                 1 => .gfxip_10_1,
                 3 => .gfxip_10_3,
                 else => blk: {
@@ -120,16 +115,16 @@ fn asicInfo(instance: *const hsa.Instance, agent_info: AgentInfo) sqtt.AsicInfo 
         .ce_ram_size_compute = 0,
         .max_number_of_dedicated_cus = 0,
         .vram_size = 32 * 1024 * 1024 * 1024,
-        .vram_bus_width = instance.getAgentInfo(agent, .memory_width),
-        .l2_cache_size = cache_size[1],
-        .l1_cache_size = cache_size[0],
+        .vram_bus_width = gpu_props.memory_width,
+        .l2_cache_size = props.cache_size[1],
+        .l1_cache_size = props.cache_size[0],
         .lds_size = 64 * 1024,
-        .gpu_name = agent_info.name ++ [_]u8{0} ** 192,
+        .gpu_name = props.name ++ [_]u8{0} ** 192,
         .alu_per_clock = 0,
         .texture_per_clock = 0,
-        .prims_per_clock = @intToFloat(f32, agent_info.shader_engines) * 2,
+        .prims_per_clock = @intToFloat(f32, props.shader_engines) * 2,
         .pixels_per_clock = 0,
-        .gpu_timestamp_frequency = instance.getAgentInfo(agent, .timestamp_freq),
+        .gpu_timestamp_frequency = props.timestamp_freq,
         .max_shader_core_clock = clock_freq,
         .max_memory_clock = mem_freq,
         .memory_ops_per_clock = 16,
@@ -139,7 +134,7 @@ fn asicInfo(instance: *const hsa.Instance, agent_info: AgentInfo) sqtt.AsicInfo 
     };
 }
 
-pub fn apiInfo() sqtt.ApiInfo {
+fn apiInfo() sqtt.ApiInfo {
     return .{
         .header = chunkHeader(.api_info, @sizeOf(sqtt.ApiInfo), 0, 1),
         .api_type = .hip,
@@ -152,74 +147,144 @@ pub fn apiInfo() sqtt.ApiInfo {
     };
 }
 
-pub fn writeCapture(
-    backing_writer: anytype,
-    instance: *const hsa.Instance,
-    cpu_agent: AgentInfo,
-    gpu_agent: AgentInfo,
+/// Models a full RGP trace.
+pub const Capture = struct {
+    pub const LoadEvent = struct {
+        event_type: sqtt.ObjectLoaderEvents.EventType,
+        base_address: u64,
+        code_object_hash: u64,
+        timestamp: u64,
+    };
+
+    pub const CodeObject = struct {
+        elf_binary: []const u8,
+    };
+
+    cpu_agent: *const AgentInfo,
+    gpu_agent: *const AgentInfo,
     traces: []const ThreadTrace.Trace,
-) !void {
-    // std.log.debug("saving {} traces", .{traces.len});
-    // _ = traces;
+    load_events: []const LoadEvent,
+    code_objects: []const CodeObject,
 
-    var cw = std.io.countingWriter(backing_writer);
-    const writer = cw.writer();
+    pub fn write(self: Capture, backing_writer: anytype) !void {
+        var cw = std.io.countingWriter(backing_writer);
+        const writer = cw.writer();
 
-    try writer.writeStruct(fileHeader());
-    try writer.writeStruct(cpuInfo(instance, cpu_agent));
-    try writer.writeStruct(asicInfo(instance, gpu_agent));
-    try writer.writeStruct(apiInfo());
+        try writer.writeStruct(fileHeader());
+        try writer.writeStruct(cpuInfo(self.cpu_agent.*));
+        try writer.writeStruct(asicInfo(self.gpu_agent.*));
+        try writer.writeStruct(apiInfo());
 
-    for (traces) |trace, i| {
-        try writer.writeStruct(sqtt.SqttDesc{
-            .header = .{
-                .chunk_id = .{
-                    .chunk_type = .sqtt_desc,
-                    .index = @intCast(u8, i),
+        {
+            const code_objects = self.code_objects[0..1];
+            const co_alignment = 4; // Apparently code objects must be aligned by 4 bytes.
+            var size: usize = @sizeOf(sqtt.CodeObjectDatabase);
+            for (code_objects) |co| {
+                const aligned_size = std.mem.alignForward(co.elf_binary.len, co_alignment);
+                size += @sizeOf(sqtt.CodeObjectDatabase.Record) + aligned_size;
+            }
+            try writer.writeStruct(sqtt.CodeObjectDatabase{
+                .header = chunkHeader(.code_object_database, @intCast(u32, size), 0, 0),
+                .offset = @intCast(u32, cw.bytes_written),
+                .flags = 0,
+                .size = @intCast(u32, size),
+                .record_count = @intCast(u32, code_objects.len),
+            });
+
+            for (code_objects) |co| {
+                const aligned_size = std.mem.alignForward(co.elf_binary.len, co_alignment);
+                try writer.writeStruct(sqtt.CodeObjectDatabase.Record{
+                    .record_size = @intCast(u32, aligned_size),
+                });
+                try writer.writeAll(co.elf_binary);
+                // Add the misaligned bytes.
+                try writer.writeByteNTimes(0, aligned_size - co.elf_binary.len);
+            }
+        }
+
+        {
+            const size = @sizeOf(sqtt.ObjectLoaderEvents) + @sizeOf(sqtt.ObjectLoaderEvents.Record) * self.load_events.len;
+            try writer.writeStruct(sqtt.ObjectLoaderEvents{
+                .header = chunkHeader(.code_object_loader_events, @intCast(u32, size), 1, 1),
+                .offset = @intCast(u32, cw.bytes_written),
+                .flags = 0,
+                .record_size = @sizeOf(sqtt.ObjectLoaderEvents.Record),
+                .record_count = @intCast(u32, self.load_events.len),
+            });
+
+            for (self.load_events) |event| {
+                try writer.writeStruct(sqtt.ObjectLoaderEvents.Record{
+                    .event_type = event.event_type,
+                    .base_address = event.base_address,
+                    .code_object_hash = .{ event.code_object_hash, event.code_object_hash },
+                    .timestamp = event.timestamp,
+                });
+            }
+        }
+
+        // Just infer the PSO correlation from the load events for now.
+        {
+            const size = @sizeOf(sqtt.PsoCorrelation) + @sizeOf(sqtt.PsoCorrelation.Record) * self.load_events.len;
+            try writer.writeStruct(sqtt.PsoCorrelation{
+                .header = chunkHeader(.pso_correlation, @intCast(u32, size), 0, 0),
+                .offset = @intCast(u32, cw.bytes_written),
+                .flags = 0,
+                .record_size = @sizeOf(sqtt.PsoCorrelation.Record),
+                .record_count = @intCast(u32, self.load_events.len),
+            });
+
+            for (self.load_events) |event| {
+                try writer.writeStruct(sqtt.PsoCorrelation.Record{
+                    .api_pso_hash = event.code_object_hash,
+                    .internal_pipeline_hash = .{ event.code_object_hash, event.code_object_hash },
+                    .api_object_name = "a".* ** 64,
+                });
+            }
+        }
+
+        for (self.traces) |trace, i| {
+            try writer.writeStruct(sqtt.SqttDesc{
+                .header = .{
+                    .chunk_id = .{
+                        .chunk_type = .sqtt_desc,
+                        .index = @intCast(u8, i),
+                    },
+                    .ver_minor = 2,
+                    .ver_major = 0,
+                    .size_bytes = @sizeOf(sqtt.SqttDesc),
                 },
-                .ver_minor = 2,
-                .ver_major = 0,
-                .size_bytes = @sizeOf(sqtt.SqttDesc),
-            },
 
-            .shader_engine_index = trace.shader_engine,
-            .version = .@"2.4",
-            .instrumentation_spec_version = 1,
-            .instrumentation_api_version = 0,
-            .compute_unit_index = trace.compute_unit,
-        });
+                .shader_engine_index = trace.shader_engine,
+                .version = .@"2.4",
+                .instrumentation_spec_version = 1,
+                .instrumentation_api_version = 0,
+                .compute_unit_index = trace.compute_unit,
+            });
 
-        try writer.writeStruct(sqtt.SqttData{
-            .header = .{
-                .chunk_id = .{
-                    .chunk_type = .sqtt_data,
-                    .index = @intCast(u8, i),
+            try writer.writeStruct(sqtt.SqttData{
+                .header = .{
+                    .chunk_id = .{
+                        .chunk_type = .sqtt_data,
+                        .index = @intCast(u8, i),
+                    },
+                    .ver_minor = 0,
+                    .ver_major = 0,
+                    .size_bytes = @intCast(u32, @sizeOf(sqtt.SqttData) + trace.data.len),
                 },
-                .ver_minor = 0,
-                .ver_major = 0,
-                .size_bytes = @intCast(u32, @sizeOf(sqtt.SqttData) + trace.data.len),
-            },
-            .offset = @intCast(i32, @sizeOf(sqtt.SqttData) + cw.bytes_written),
-            .size = @intCast(u32, trace.data.len),
-        });
+                .offset = @intCast(i32, @sizeOf(sqtt.SqttData) + cw.bytes_written),
+                .size = @intCast(u32, trace.data.len),
+            });
 
-        try writer.writeAll(trace.data);
+            try writer.writeAll(trace.data);
+        }
     }
-}
 
-pub fn dumpCapture(
-    name: []const u8,
-    instance: *const hsa.Instance,
-    cpu_agent: AgentInfo,
-    gpu_agent: AgentInfo,
-    traces: []const ThreadTrace.Trace,
-) !void {
-    const file = try std.fs.cwd().createFile(name, .{});
-    defer file.close();
+    pub fn dump(self: Capture, name: []const u8) !void {
+        const file = try std.fs.cwd().createFile(name, .{});
+        defer file.close();
 
-    var bw = std.io.bufferedWriter(file.writer());
-    try writeCapture(bw.writer(), instance, cpu_agent, gpu_agent, traces);
-    try bw.flush();
-
-    std.log.info("saved capture to '{s}'", .{name});
-}
+        var bw = std.io.bufferedWriter(file.writer());
+        try self.write(bw.writer());
+        try bw.flush();
+    }
+};

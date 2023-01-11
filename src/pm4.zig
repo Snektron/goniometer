@@ -45,7 +45,10 @@ pub const ShRegister = enum(u16) {
 pub const UConfigRegister = enum(u32) {
     pub const base = 0x30000;
 
+    spi_config_cntl = 0x31100,
     grbm_gfx_index = 0x30800,
+    cp_perfmon_cntl = 0x36020,
+    rlc_perfmon_clock_cntl = 0x37390,
 
     pub fn address(self: UConfigRegister) u32 {
         return (@enumToInt(self) - base) / @sizeOf(u32);
@@ -53,6 +56,17 @@ pub const UConfigRegister = enum(u32) {
 
     pub fn Type(comptime self: UConfigRegister) type {
         return switch (self) {
+            .spi_config_cntl => packed struct(u32) {
+                gpr_write_priority: u21,
+                exp_priority_order: u3,
+                enable_sqg_top_events: bool,
+                enable_sqg_bop_events: bool,
+                rsrc_mgmt_reset: bool,
+                ttrace_stall_all: bool,
+                alloc_arb_lru_ena: bool,
+                exp_arb_lru_ena: bool,
+                ps_pkr_priority_cntl: u2,
+            },
             .grbm_gfx_index => packed struct(u32) {
                 instance_index: u8,
                 sa_index: u8,
@@ -61,6 +75,31 @@ pub const UConfigRegister = enum(u32) {
                 sa_broadcast_writes: bool,
                 instance_broadcast_writes: bool,
                 se_broadcast_writes: bool,
+            },
+            .cp_perfmon_cntl => packed struct(u32) {
+                pub const State = enum(u4) {
+                    disable_and_reset = 0,
+                    start_counting = 1,
+                    stop_count = 2,
+                    disable_and_reset_phantom = 4,
+                    count_and_dump_pantom = 5,
+                };
+
+                pub const Mode = enum(u2) {
+                    always_count = 0,
+                    count_context_true = 2,
+                    count_context_false = 3,
+                };
+
+                perfmon_state: State,
+                spm_perfmon_state: State,
+                enable_mode: Mode,
+                sample_enable: bool,
+                _reserved: u21 = 0,
+            },
+            .rlc_perfmon_clock_cntl => packed struct(u32) {
+                inhibit_clock: bool,
+                _reserved: u31 = 0,
             },
         };
     }
@@ -224,6 +263,7 @@ pub const CopyData = packed struct(u160) {
 
 pub const EventWrite = packed struct(u96) {
     pub const EventType = enum(u8) {
+        cs_partial_flush = 7,
         thread_trace_start = 51,
         thread_trace_stop = 52,
         thread_trace_finish = 55,
@@ -268,6 +308,59 @@ pub const WaitRegMem = packed struct(u192) {
     mask: u32,
     poll_interval: u16,
     _reserved4: u16 = 0,
+};
+
+pub const AcquireMem = packed struct(u224) {
+    pub const GcrCntl = packed struct(u32) {
+        pub const GliInv = enum(u2) {
+            nop = 0,
+            all = 1,
+            range = 2,
+            first_last = 3,
+        };
+
+        pub const Gl1Range = enum(u2) {
+            all = 0,
+            range = 2,
+            first_last = 3,
+        };
+
+        pub const Gl2Range = enum(u2) {
+            all = 0,
+            vol = 1,
+            range = 2,
+            first_last = 3,
+        };
+
+        pub const Seq = enum(u2) {
+            parallel = 0,
+            forward = 1,
+            reverse = 2,
+        };
+
+        gli_inv: GliInv,
+        gl1_range: Gl1Range,
+        glm_wb: bool,
+        glm_inv: bool,
+        glk_wb: bool,
+        glk_inv: bool,
+        glv_inv: bool,
+        gl1_inv: bool,
+        gl2_us: bool,
+        gl2_range: Gl2Range,
+        gl2_discard: bool,
+        gl2_inv: bool,
+        gl2_wb: bool,
+        seq: Seq,
+        range_is_pa: bool,
+        _reserved: u13 = 0,
+    };
+
+    coher_cntl: u32,
+    coher_size: u64,
+    coher_base: u64,
+    poll_interval: u32,
+    gcr_cntl: GcrCntl,
 };
 
 // Taken from https://github.com/GPUOpen-Drivers/pal/blob/dev/src/core/hw/gfxip/gfx9/chip/gfx9_plus_merged_pm4_it_opcodes.h

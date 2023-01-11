@@ -27,6 +27,34 @@ fn dump(name: []const u8, depth: usize, writer: anytype, val: anytype) !void {
     }
 }
 
+fn dumpCodeObjectDb(out: anytype, name: []const u8, data: []align(0x1000) const u8) !void {
+    const db = @ptrCast(*const sqtt.CodeObjectDatabase, data.ptr).*;
+    try dump(name, 0, out, db);
+
+    // Note: actually this is db.offset + @sizeOf(sqtt.CodeObjectDatabase),
+    // but it seems that PAL puts it right after too.
+    var offset: usize = @sizeOf(sqtt.CodeObjectDatabase);
+    var i: usize = 0;
+    while (i < db.record_count) : (i += 1) {
+        const record = @ptrCast(*const sqtt.CodeObjectDatabase.Record, @alignCast(4, &data[offset]));
+        offset += @sizeOf(sqtt.CodeObjectDatabase.Record);
+        const binary = data[offset..][0..record.record_size];
+        offset += record.record_size;
+        try out.print(
+            \\  record {}:
+            \\    record_size: {}
+            \\
+        ,
+            .{ i, record.record_size },
+        );
+
+        var n = "aaa.elf".*;
+        n[0] = @intCast(u8, i) + '0';
+        try std.fs.cwd().writeFile(&n, binary);
+    }
+    try out.print("  size adds up: {}\n", .{offset == db.header.size_bytes});
+}
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -54,6 +82,7 @@ pub fn main() !void {
     var buf = std.ArrayListAligned(u8, 0x1000).init(allocator);
 
     var i: usize = 0;
+    var offset = @intCast(usize, header.chunk_offset);
     while (true) : (i += 1) {
         const chunk_header = in.readStruct(sqtt.ChunkHeader) catch |err| switch (err) {
             error.EndOfStream => break,
@@ -63,13 +92,15 @@ pub fn main() !void {
         std.mem.copy(u8, buf.items, std.mem.asBytes(&chunk_header));
         try in.readNoEof(buf.items[@sizeOf(sqtt.ChunkHeader)..]);
 
-        const name = try std.fmt.allocPrint(allocator, "chunk {}", .{i});
+        const name = try std.fmt.allocPrint(allocator, "chunk {} at 0x{x}", .{ i, offset });
+        offset += chunk_header.size_bytes;
         switch (chunk_header.chunk_id.chunk_type) {
             .cpu_info => try dump(name, 0, out, @ptrCast(*const sqtt.CpuInfo, buf.items.ptr).*),
             .asic_info => try dump(name, 0, out, @ptrCast(*const sqtt.AsicInfo, buf.items.ptr).*),
             .api_info => try dump(name, 0, out, @ptrCast(*const sqtt.ApiInfo, buf.items.ptr).*),
             .sqtt_desc => try dump(name, 0, out, @ptrCast(*const sqtt.SqttDesc, buf.items.ptr).*),
             .sqtt_data => try dump(name, 0, out, @ptrCast(*const sqtt.SqttData, buf.items.ptr).*),
+            .code_object_database => try dumpCodeObjectDb(out, name, buf.items),
             else => {
                 try dump(name, 0, out, .{ .header = chunk_header });
             },
