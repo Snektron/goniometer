@@ -288,3 +288,99 @@ pub const PsoCorrelation = extern struct {
     record_size: u32,
     record_count: u32,
 };
+
+pub const marker = struct {
+    /// Note: the meaning of the marker identifier depends on the API that is being used. This type
+    /// is specifically for HIP/OpenCL.
+    pub const Identifier = enum(u4) {
+        event = 0x0,
+        cmdbuf_start = 0x1,
+        cmdbuf_end = 0x2,
+        barrier_start = 0x3,
+        barrier_end = 0x4,
+        user_event = 0x5,
+        general_api = 0x6,
+        sync = 0x7,
+        present = 0x8,
+        layout_transition = 0x9,
+        render_pass = 0xA,
+        reserved2 = 0xB,
+        pipeline_bind = 0xC,
+        reserved4 = 0xD,
+        reserved5 = 0xE,
+        reserved6 = 0xF,
+    };
+
+    pub const Event = packed struct(u96) {
+        pub const Type = enum(u24) {
+            cmd_nd_range_kernel = 0,
+            cmd_scheduler = 1,
+            cmd_copy_buffer = 2,
+            cmd_copy_image_to_buffer = 3,
+            cmd_copy_buffer_to_image = 4,
+            cmd_fill_buffer = 5,
+            cmd_copy_image = 6,
+            cmd_fill_image = 7,
+            cmd_pipeline_barrier = 8,
+            internal_unknown = 26,
+            invalid = 0xFF_FFFF,
+        };
+
+        identifier: Identifier = .event,
+        extra_dwords: u3,
+        api_type: Type,
+        has_thread_dims: bool,
+
+        cmdbuf_id: u20,
+        vertex_offset_reg_idx: u4 = 0,
+        instance_offset_reg_idx: u4 = 0,
+        draw_index_reg_idx: u4 = 0,
+
+        cmd_id: u32,
+    };
+
+    pub const EventWithDims = packed struct(u192) {
+        event: Event,
+        work_group_size_x: u32,
+        work_group_size_y: u32,
+        work_group_size_z: u32,
+    };
+
+    pub const BindPoint = enum(u1) {
+        graphics = 0,
+        compute = 1,
+    };
+
+    pub const PipelineBind = packed struct(u96) {
+        identifier: Identifier = .pipeline_bind,
+        extra_dwords: u3,
+        bind_point: BindPoint,
+        cmdbuf_id: u20,
+        _reserved: u4 = 0,
+        api_pso_hash: u64,
+    };
+
+    pub const UserEvent = packed struct(u32) {
+        pub const Type = enum(u8) {
+            trigger = 0x0,
+            pop = 0x1,
+            push = 0x2,
+            object_name = 0x3,
+            reserved1 = 0x4,
+            reserved2 = 0x5,
+            reserved3 = 0x6,
+            reserved4 = 0x7,
+        };
+
+        identifier: Identifier = .user_event,
+        extra_dwords: u8,
+        data_type: Type,
+        _reserved: u12 = 0,
+    };
+
+    pub const UserEventWithString = extern struct {
+        user_event: UserEvent,
+        str_len: u32,
+        str_data: [1024 * 4]u8,
+    };
+};

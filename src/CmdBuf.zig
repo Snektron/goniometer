@@ -187,3 +187,14 @@ pub fn cacheFlush(self: *Self, flags: FlushFlags) void {
     };
     self.pkt3(.acquire_mem, .{}, asWords(&acquire));
 }
+
+pub fn sqttMarker(self: *Self, data: []const pm4.Word) void {
+    // Writing the SQTT user data is used by alternating between sqtt_userdata_2 and sqtt_userdata_3,
+    // which are sequentially in the uconfig register address space.
+    const words_per_batch = 2;
+    var i: usize = 0;
+    while (i < data.len) : (i += words_per_batch) {
+        const words_to_write = @min(data.len - i, words_per_batch);
+        self.setUConfigRegs(.sqtt_userdata_2, data[i..][0..words_to_write]);
+    }
+}

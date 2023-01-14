@@ -45,8 +45,9 @@ pub const ShRegister = enum(u16) {
 pub const UConfigRegister = enum(u32) {
     pub const base = 0x30000;
 
-    spi_config_cntl = 0x31100,
     grbm_gfx_index = 0x30800,
+    sqtt_userdata_2 = 0x30D08,
+    spi_config_cntl = 0x31100,
     cp_perfmon_cntl = 0x36020,
     rlc_perfmon_clock_cntl = 0x37390,
 
@@ -101,6 +102,7 @@ pub const UConfigRegister = enum(u32) {
                 inhibit_clock: bool,
                 _reserved: u31 = 0,
             },
+            .sqtt_userdata_2 => u32,
         };
     }
 };

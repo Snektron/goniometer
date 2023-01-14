@@ -3,6 +3,9 @@
 const std = @import("std");
 const AtomicOrder = std.builtin.AtomicOrder;
 
+const pm4 = @import("pm4.zig");
+const CmdBuf = @import("CmdBuf.zig");
+
 pub const c = @cImport({
     @cInclude("hsa/hsa.h");
     @cInclude("hsa/hsa_ext_amd.h");
@@ -338,6 +341,65 @@ pub const Packet = extern struct {
             return @ptrCast(*ty.PacketType(), self);
         }
         return null;
+    }
+};
+
+/// This is a HSA packet that can be used to make the GPU execute a PM4 command stream
+/// instead of the regular aqlqueue command stream.
+/// Note: This packet is different for GFX <= 8. Check AMDPAL for its structure
+/// in that situation.
+pub const Pm4IndirectBufferPacket = extern struct {
+    comptime {
+        std.debug.assert(@sizeOf(Pm4IndirectBufferPacket) == Packet.alignment);
+    }
+
+    const pm4_size = 4;
+
+    /// Sub-type of this packet
+    pub const Type = enum(u16) {
+        // PM4 'indirect_buffer' command. Only the indirect buffer command may
+        // be placed in the pm4 data, it seems.
+        pm4_ib = 0x1,
+    };
+
+    /// HSA packet header, set to 0 for vendor-specific packet.
+    header: Packet.Header,
+    /// Vendor-specific-packet header.
+    ven_hdr: Type,
+    /// The actual PM4 command for this packet. It seems that there can only be one
+    /// type of command here, corresponding to the ven_hdr, of which currently only
+    /// the IB command is known.
+    pm4: [pm4_size]pm4.Word,
+    /// The amount of words that remain
+    dw_remain: u32,
+    /// Padding
+    _reserved: [8]u32 = .{0} ** 8,
+    /// Signal that probably gets ringed if this packet has been finished executing or something.
+    completion_signal: Signal,
+
+    pub fn init(ib: []const pm4.Word) Pm4IndirectBufferPacket {
+        var packet = Pm4IndirectBufferPacket{
+            .header = .{
+                .packet_type = .vendor_specific,
+                .barrier = 0,
+                .acquire_fence_scope = 0,
+                .release_fence_scope = 0,
+            },
+            .ven_hdr = .pm4_ib,
+            .pm4 = .{0} ** pm4_size,
+            .dw_remain = 0xA,
+            .completion_signal = .{ .handle = 0 },
+        };
+        var cmdbuf = CmdBuf{
+            .cap = pm4_size,
+            .buf = &packet.pm4,
+        };
+        cmdbuf.indirectBuffer(ib);
+        return packet;
+    }
+
+    pub fn asHsaPacket(self: *const Pm4IndirectBufferPacket) *const Packet {
+        return @ptrCast(*const Packet, self);
     }
 };
 

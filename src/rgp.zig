@@ -237,7 +237,7 @@ pub const Capture = struct {
                 try writer.writeStruct(sqtt.PsoCorrelation.Record{
                     .api_pso_hash = event.code_object_hash,
                     .internal_pipeline_hash = .{ event.code_object_hash, event.code_object_hash },
-                    .api_object_name = "a".* ** 64,
+                    .api_object_name = .{0} ** 64,
                 });
             }
         }

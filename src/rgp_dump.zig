@@ -38,7 +38,7 @@ fn dumpCodeObjectDb(out: anytype, name: []const u8, data: []align(0x1000) const 
     while (i < db.record_count) : (i += 1) {
         const record = @ptrCast(*const sqtt.CodeObjectDatabase.Record, @alignCast(4, &data[offset]));
         offset += @sizeOf(sqtt.CodeObjectDatabase.Record);
-        const binary = data[offset..][0..record.record_size];
+        // const binary = data[offset..][0..record.record_size];
         offset += record.record_size;
         try out.print(
             \\  record {}:
@@ -47,12 +47,23 @@ fn dumpCodeObjectDb(out: anytype, name: []const u8, data: []align(0x1000) const 
         ,
             .{ i, record.record_size },
         );
-
-        var n = "aaa.elf".*;
-        n[0] = @intCast(u8, i) + '0';
-        try std.fs.cwd().writeFile(&n, binary);
     }
     try out.print("  size adds up: {}\n", .{offset == db.header.size_bytes});
+}
+
+fn dumpPsoCorrelation(out: anytype, name: []const u8, data: []align(0x1000) const u8) !void {
+    const pso = @ptrCast(*const sqtt.PsoCorrelation, data.ptr).*;
+    try dump(name, 0, out, pso);
+
+    // In practise the offset is always behind the struct.
+    var offset: usize = @sizeOf(sqtt.PsoCorrelation);
+    var i: usize = 0;
+    while (i < pso.record_count) : (i += 1) {
+        const record = @ptrCast(*const sqtt.PsoCorrelation.Record, @alignCast(8, &data[offset]));
+        offset += pso.record_size;
+        try out.print("  record {}:\n", .{i});
+        try dump("record", 2, out, record.*);
+    }
 }
 
 pub fn main() !void {
@@ -101,6 +112,7 @@ pub fn main() !void {
             .sqtt_desc => try dump(name, 0, out, @ptrCast(*const sqtt.SqttDesc, buf.items.ptr).*),
             .sqtt_data => try dump(name, 0, out, @ptrCast(*const sqtt.SqttData, buf.items.ptr).*),
             .code_object_database => try dumpCodeObjectDb(out, name, buf.items),
+            .pso_correlation => try dumpPsoCorrelation(out, name, buf.items),
             else => {
                 try dump(name, 0, out, .{ .header = chunk_header });
             },

@@ -5,6 +5,7 @@ const elf = @import("elf.zig");
 const hsa = @import("hsa.zig");
 const rgp = @import("rgp.zig");
 const pm4 = @import("pm4.zig");
+const sqtt = @import("sqtt.zig");
 const ThreadTrace = @import("ThreadTrace.zig");
 
 const stop_trace_signal_timeout_ns = std.time.ns_per_s * 10;
@@ -163,6 +164,7 @@ sessions: std.ArrayListUnmanaged(Session) = .{},
 /// Code object load events. These are common for all agents, and are regardless of session.
 load_events: std.ArrayListUnmanaged(rgp.Capture.LoadEvent) = .{},
 /// The actual code objects that were encountered. The binary is owned by self.a.
+// TODO: Is this per-agent?
 code_objects: std.ArrayListUnmanaged(rgp.Capture.CodeObject) = .{},
 
 pub fn init(a: std.mem.Allocator, api_table: *const hsa.ApiTable) !Profiler {
@@ -237,11 +239,11 @@ fn queryAgentsCbk(self: *Profiler, agent: hsa.Agent) !?void {
     info.properties = .{
         .name = self.instance.getAgentInfo(agent, .name),
         .agent_type = self.instance.getAgentInfo(agent, .device_type),
-        .shader_engines = self.instance.getAgentInfo(agent, .num_shader_engines),
+        .shader_engines = 4, // self.instance.getAgentInfo(agent, .num_shader_engines),
         .vendor_name = self.instance.getAgentInfo(agent, .vendor_name),
         .product_name = self.instance.getAgentInfo(agent, .product_name),
-        .compute_units = self.instance.getAgentInfo(agent, .num_compute_units),
-        .simds_per_cu = self.instance.getAgentInfo(agent, .num_simds_per_cu),
+        .compute_units = 72, // self.instance.getAgentInfo(agent, .num_compute_units),
+        .simds_per_cu = 4, // self.instance.getAgentInfo(agent, .num_simds_per_cu),
         .cache_size = self.instance.getAgentInfo(agent, .cache_size),
         .clock_freq = self.instance.getAgentInfo(agent, .max_clock_freq),
         .chip_id = self.instance.getAgentInfo(agent, .chip_id),
@@ -411,6 +413,20 @@ pub fn submit(self: *Profiler, pq: *ProfileQueue, packet: *const hsa.Packet) voi
     self.instance.signalStore(queue.doorbell_signal, @intCast(hsa.SignalValue, write_index), .Monotonic);
 }
 
+/// Submit a PM4 command buffer to an HSA queue.
+pub fn submitPm4(
+    self: *Profiler,
+    pq: *ProfileQueue,
+    commands: []const pm4.Word,
+    completion_signal: ?hsa.Signal,
+) void {
+    var packet = hsa.Pm4IndirectBufferPacket.init(commands);
+    if (completion_signal) |signal| {
+        packet.completion_signal = signal;
+    }
+    self.submit(pq, packet.asHsaPacket());
+}
+
 /// Turn an HSA queue handle into its associated ProfileQueue, if that exists.
 pub fn getProfileQueue(self: *Profiler, queue: *const hsa.Queue) ?*ProfileQueue {
     return self.queues.get(queue.doorbell_signal);
@@ -424,27 +440,20 @@ pub fn startTrace(self: *Profiler, pq: *ProfileQueue) void {
     // and the stuff from radv_emit_thread_trace_start.
     std.log.info("starting kernel trace", .{});
 
-    // const c = @cImport({
-    //     @cInclude("hsa/hsa_ven_amd_aqlprofile.h");
-    // });
-
-    var dl = std.DynLib.open("/opt/rocm-5.3.0/lib/libhsa-amd-aqlprofile64.so.1.0.50300") catch unreachable;
-    defer dl.close();
-    const start = dl.lookup(*const @TypeOf(hsa.c.hsa_ven_amd_aqlprofile_start), "hsa_ven_amd_aqlprofile_start").?;
-    _ = start;
-
-    self.submit(pq, pq.thread_trace.start_packet.asHsaPacket());
+    self.submitPm4(pq, pq.thread_trace.start_commands, null);
 }
 
 /// Stop tracing.
 pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) !void {
     std.log.info("stopping kernel trace", .{});
-    self.submit(pq, pq.thread_trace.stop_packet.asHsaPacket());
+    const signal = pq.thread_trace.completion_signal;
+    self.submitPm4(pq, pq.thread_trace.stop_commands, signal);
 
     // Wait until the stop trace packet has been processed.
+    // TODO: Do we need this? we're going to wait until the GPU is idle during the read anyway...
     while (true) {
         const value = self.instance.signalWait(
-            pq.thread_trace.stop_packet.completion_signal,
+            signal,
             .lt,
             1,
             stop_trace_signal_timeout_ns,
@@ -457,7 +466,7 @@ pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) !void {
             else => std.log.err("invalid signal value", .{}),
         }
     }
-    self.instance.signalStore(pq.thread_trace.stop_packet.completion_signal, 1, .Monotonic);
+    self.instance.signalStore(signal, 1, .Monotonic);
 
     // const cpu_agent_info = self.agents.keys()[self.cpu_agent];
     const gpu_agent_info = self.agents.keys()[pq.agent];
@@ -502,8 +511,6 @@ pub fn registerExecutable(self: *Profiler, exe: hsa.Executable) !void {
     const uri = try self.instance.getLoadedCodeObjectUri(code_object, self.a);
     defer self.a.free(uri);
 
-    std.log.debug("registering executable with code object '{s}'", .{uri});
-
     const storage_type = self.instance.getLoadedCodeObjectInfo(code_object, .storage_type);
     const binary = switch (storage_type) {
         .memory => blk: {
@@ -528,11 +535,15 @@ pub fn registerExecutable(self: *Profiler, exe: hsa.Executable) !void {
     const text_va = elf.getSectionVirtualAddr(binary, ".text") catch return error.Generic;
     const load_delta = self.instance.getLoadedCodeObjectInfo(code_object, .load_delta);
 
+    // Quickly compute a hash from the elf file.
+    const hash = std.hash.Wyhash.hash(0, binary);
+    std.log.debug("registering executable '{s}' with hash 0x{x:0>16}", .{ uri, hash });
+
     try self.load_events.append(self.a, .{
         .event_type = .load_to_gpu_memory,
         .base_address = text_va +% @bitCast(u64, load_delta),
-        .code_object_hash = 0, // TODO
-        .timestamp = 0, // TODO
+        .code_object_hash = hash,
+        .timestamp = @bitCast(u64, @truncate(i64, std.time.nanoTimestamp())),
     });
 
     // std.log.debug(".text va: 0x{X}, delta: 0x{X}, loaded .text va: 0x{X}", .{text_va, load_delta, real_text_va});
