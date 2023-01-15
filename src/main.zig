@@ -64,6 +64,8 @@ fn queueSetProfingEnabled(queue: [*c]hsa.Queue, enable: c_int) callconv(.C) hsa.
     }
 }
 
+var submit_nr: usize = 0;
+
 fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) void {
     const pq = profiler.queues.get(signal) orelse {
         // No such queue, so this is probably a signal for something else.
@@ -80,11 +82,17 @@ fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) vo
         const index = i % pq.queue.size;
         const packet = &packet_buf[index];
         if (packet.cast(.kernel_dispatch)) |kernel_dispatch_packet| {
-            profiler.startTrace(pq);
+            // TODO: remove hack
+            if (submit_nr == 0) {
+                profiler.startTrace(pq);
+            }
             profiler.dispatchKernel(pq, kernel_dispatch_packet);
-            profiler.stopTrace(pq) catch |err| {
-                std.log.err("failed to read thread trace: {s}", .{@errorName(err)});
-            };
+            if (submit_nr == 9) {
+                profiler.stopTrace(pq) catch |err| {
+                    std.log.err("failed to read thread trace: {s}", .{@errorName(err)});
+                };
+            }
+            submit_nr += 1;
         } else {
             profiler.submit(pq, packet);
         }

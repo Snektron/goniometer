@@ -416,6 +416,7 @@ pub fn startTrace(self: *Profiler, pq: *ProfileQueue) void {
     // and the stuff from radv_emit_thread_trace_start.
     std.log.info("starting trace", .{});
     self.submit(pq, pq.thread_trace.start_packet.asHsaPacket());
+    pq.thread_trace.cmd_id = 0; // TODO: move this entire function to ThreadTrace.
 }
 
 /// Stop tracing.

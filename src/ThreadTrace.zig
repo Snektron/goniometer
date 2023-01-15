@@ -59,12 +59,13 @@ stop_packet: hsa.Pm4IndirectBufferPacket,
 /// The thread trace token update packet. Note: has a signal that should be used to wait on this packet,
 /// so that contents are not overwritten while its still being used.
 update_packet: hsa.Pm4IndirectBufferPacket,
-
 /// Backing command buffers for the above packets.
 /// TODO: Give Pm4IndirectBufferPacket a buffer() function so that we dont need to duplicate it?
 start_commands: []pm4.Word,
 stop_commands: []pm4.Word,
 update_commands: []pm4.Word,
+/// Command number counter
+cmd_id: u32,
 
 pub fn init(
     instance: *const hsa.Instance,
@@ -105,6 +106,7 @@ pub fn init(
         .start_commands = start_commands,
         .stop_commands = stop_commands,
         .update_commands = update_commands,
+        .cmd_id = 0,
     };
 }
 
@@ -156,7 +158,7 @@ pub fn update(
         .event = .{
             .extra_dwords = 0,
             .api_type = .cmd_nd_range_kernel,
-            .cmd_id = 0, // TODO
+            .cmd_id = self.cmd_id,
             .cmdbuf_id = 0, // TODO?
             .has_thread_dims = true,
         },
@@ -164,6 +166,7 @@ pub fn update(
         .wgp_count_y = wgp_count_y,
         .wgp_count_z = wgp_count_z,
     });
+    self.cmd_id +%= 1;
 
     // just reuse the signal here. TODO: allocate a new one?
     self.update_packet = hsa.Pm4IndirectBufferPacket.init(cmdbuf.words(), self.stop_packet.completion_signal);
