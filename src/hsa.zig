@@ -377,7 +377,8 @@ pub const Pm4IndirectBufferPacket = extern struct {
     /// Signal that probably gets ringed if this packet has been finished executing or something.
     completion_signal: Signal,
 
-    pub fn init(ib: []const pm4.Word) Pm4IndirectBufferPacket {
+    /// Initialze a PM4 packet. `signal` is optional.
+    pub fn init(ib: []const pm4.Word, signal: ?Signal) Pm4IndirectBufferPacket {
         var packet = Pm4IndirectBufferPacket{
             .header = .{
                 .packet_type = .vendor_specific,
@@ -388,7 +389,7 @@ pub const Pm4IndirectBufferPacket = extern struct {
             .ven_hdr = .pm4_ib,
             .pm4 = .{0} ** pm4_size,
             .dw_remain = 0xA,
-            .completion_signal = .{ .handle = 0 },
+            .completion_signal = signal orelse .{ .handle = 0 },
         };
         var cmdbuf = CmdBuf{
             .cap = pm4_size,
@@ -402,6 +403,14 @@ pub const Pm4IndirectBufferPacket = extern struct {
         return @ptrCast(*const Packet, self);
     }
 };
+
+/// Get the packet buffer for an HSA queue.
+pub fn queuePacketBuffer(queue: *Queue) []align(Packet.alignment) Packet {
+    return @ptrCast(
+        [*]align(Packet.alignment) Packet,
+        @alignCast(Packet.alignment, queue.base_address.?),
+    )[0..queue.size];
+}
 
 /// This struct represents a handle to HSA. This struct holds the function pointers that
 /// we care about, as well as Zig-like wrapper functions.
@@ -480,6 +489,41 @@ pub const Instance = struct {
             .amd_loader_loaded_code_object_get_info = loader_api.hsa_ven_amd_loader_loaded_code_object_get_info.?,
         };
     }
+
+    // Custom functionality //
+
+    /// Submit a generic packet to a HSA queue. This function may block until
+    /// there is enough room for the packet.
+    pub fn submit(
+        self: *const Instance,
+        queue: *Queue,
+        packet: *const Packet,
+    ) void {
+        const write_index = self.queueAddWriteIndex(queue, 1, .AcqRel);
+
+        // Busy loop until there is space.
+        // TODO: Maybe this can be improved or something?
+        while (write_index - self.queueLoadReadIndex(queue, .Monotonic) >= queue.size) {
+            continue;
+        }
+
+        const slot_index = @intCast(u32, write_index % queue.size);
+        const slot = &queuePacketBuffer(queue)[slot_index];
+
+        // AQL packets have an 'invalid' header, which indicates that there is no packet at this
+        // slot index yet - we want to overwrite that last, so that the packet is not read before
+        // it is completely written.
+        const packet_bytes = std.mem.asBytes(packet);
+        const slot_bytes = std.mem.asBytes(slot);
+        std.mem.copy(u8, slot_bytes[2..], packet_bytes[2..]);
+        // Write the packet header atomically.
+        @atomicStore(u16, @ptrCast(*u16, &slot.header), @bitCast(u16, packet.header), .Release);
+
+        // Finally, ring the doorbell to notify the agent of the updated packet.
+        self.signalStore(queue.doorbell_signal, @intCast(SignalValue, write_index), .Monotonic);
+    }
+
+    // Wrapped API functionality //
 
     pub fn getAgentInfo(
         self: *const Instance,

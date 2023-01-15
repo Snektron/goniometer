@@ -143,7 +143,11 @@ fn apiInfo() sqtt.ApiInfo {
         .profiling_mode = .present,
         .profiling_mode_data = undefined, // TODO: zero
         .instruction_trace_mode = .disabled,
-        .instruction_trace_data = undefined, // TODO: zero
+        .instruction_trace_data = .{
+            .shader_engine_filter = .{
+                .mask = 0,
+            },
+        },
     };
 }
 
@@ -176,7 +180,7 @@ pub const Capture = struct {
         try writer.writeStruct(apiInfo());
 
         {
-            const code_objects = self.code_objects[0..1];
+            const code_objects = self.code_objects[1..2];
             const co_alignment = 4; // Apparently code objects must be aligned by 4 bytes.
             var size: usize = @sizeOf(sqtt.CodeObjectDatabase);
             for (code_objects) |co| {
@@ -203,16 +207,17 @@ pub const Capture = struct {
         }
 
         {
-            const size = @sizeOf(sqtt.ObjectLoaderEvents) + @sizeOf(sqtt.ObjectLoaderEvents.Record) * self.load_events.len;
+            const load_events = self.load_events[1..2];
+            const size = @sizeOf(sqtt.ObjectLoaderEvents) + @sizeOf(sqtt.ObjectLoaderEvents.Record) * load_events.len;
             try writer.writeStruct(sqtt.ObjectLoaderEvents{
                 .header = chunkHeader(.code_object_loader_events, @intCast(u32, size), 1, 1),
                 .offset = @intCast(u32, cw.bytes_written),
                 .flags = 0,
                 .record_size = @sizeOf(sqtt.ObjectLoaderEvents.Record),
-                .record_count = @intCast(u32, self.load_events.len),
+                .record_count = @intCast(u32, load_events.len),
             });
 
-            for (self.load_events) |event| {
+            for (load_events) |event| {
                 try writer.writeStruct(sqtt.ObjectLoaderEvents.Record{
                     .event_type = event.event_type,
                     .base_address = event.base_address,
@@ -224,16 +229,17 @@ pub const Capture = struct {
 
         // Just infer the PSO correlation from the load events for now.
         {
-            const size = @sizeOf(sqtt.PsoCorrelation) + @sizeOf(sqtt.PsoCorrelation.Record) * self.load_events.len;
+            const load_events = self.load_events[1..2];
+            const size = @sizeOf(sqtt.PsoCorrelation) + @sizeOf(sqtt.PsoCorrelation.Record) * load_events.len;
             try writer.writeStruct(sqtt.PsoCorrelation{
                 .header = chunkHeader(.pso_correlation, @intCast(u32, size), 0, 0),
                 .offset = @intCast(u32, cw.bytes_written),
                 .flags = 0,
                 .record_size = @sizeOf(sqtt.PsoCorrelation.Record),
-                .record_count = @intCast(u32, self.load_events.len),
+                .record_count = @intCast(u32, load_events.len),
             });
 
-            for (self.load_events) |event| {
+            for (load_events) |event| {
                 try writer.writeStruct(sqtt.PsoCorrelation.Record{
                     .api_pso_hash = event.code_object_hash,
                     .internal_pipeline_hash = .{ event.code_object_hash, event.code_object_hash },

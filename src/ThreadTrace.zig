@@ -13,12 +13,11 @@ const AgentInfo = @import("Profiler.zig").AgentInfo;
 /// The default size of the thread trace buffer, values taken from rocprof/mesa.
 const thread_trace_buffer_size = 32 * 1024 * 1024;
 
-/// The default size for the start command buffer. Increase as needed, but should be aligned
+/// The default size for the start, stop and update command buffers. Increase as needed, but should be aligned
 /// to page size (0x1000) in bytes. Note: size is in words.
-const start_cmd_size = 0x400;
-/// The default size for the stop command buffer. Increase as needed, but should be aligned
-/// to page size (0x1000) in bytes. Note: size is in words.
-const stop_cmd_size = 0x400;
+const start_cmd_size = 0x4000;
+const stop_cmd_size = 0x4000;
+const update_cmd_max_size = 0x4000;
 
 const sqtt_buffer_align_shift = 12;
 const sqtt_buffer_align = 1 << sqtt_buffer_align_shift;
@@ -42,7 +41,7 @@ pub const Trace = struct {
     data: []const u8,
     /// The shader engine that this trace was recorded for.
     shader_engine: u32,
-    /// The compute unit on the shader engien that this trace was recorded for.
+    /// The compute unit on the shader engine that this trace was recorded for.
     compute_unit: u32,
 
     pub fn deinit(self: *Trace, a: Allocator) void {
@@ -53,15 +52,19 @@ pub const Trace = struct {
 
 output_buffer: []u8,
 
-/// Generic PM4 commands to start tracing. This does not include any markers or anything.
+/// The start packets. They are here to avoid having to reconstruct them.
+start_packet: hsa.Pm4IndirectBufferPacket,
+/// The stop packet. Note: has a signal that should be used to wait on this packet.
+stop_packet: hsa.Pm4IndirectBufferPacket,
+/// The thread trace token update packet. Note: has a signal that should be used to wait on this packet,
+/// so that contents are not overwritten while its still being used.
+update_packet: hsa.Pm4IndirectBufferPacket,
+
+/// Backing command buffers for the above packets.
+/// TODO: Give Pm4IndirectBufferPacket a buffer() function so that we dont need to duplicate it?
 start_commands: []pm4.Word,
-
-/// Generic PM4 commands to stop tracing.
 stop_commands: []pm4.Word,
-
-/// A completion signal to be used to wait until the trace stop has been processed.
-/// This should be submitted together with the stop_commands.
-completion_signal: hsa.Signal,
+update_commands: []pm4.Word,
 
 pub fn init(
     instance: *const hsa.Instance,
@@ -77,6 +80,8 @@ pub fn init(
     errdefer instance.memoryPoolFree(output_buffer);
     instance.agentsAllowAccess(output_buffer.ptr, &.{agent_info.agent});
 
+    // TODO: Consolidate command buffer allocations.
+
     const start_commands = try startCommands(instance, cpu_pool, agent_info.properties.shader_engines, output_buffer);
     errdefer instance.memoryPoolFree(start_commands);
     instance.agentsAllowAccess(start_commands.ptr, &.{agent_info.agent});
@@ -85,21 +90,84 @@ pub fn init(
     errdefer instance.memoryPoolFree(stop_commands);
     instance.agentsAllowAccess(stop_commands.ptr, &.{agent_info.agent});
 
-    var self = Self{
+    const update_commands = try instance.memoryPoolAllocate(pm4.Word, cpu_pool, update_cmd_max_size);
+    errdefer instance.memoryPoolFree(update_commands);
+    instance.agentsAllowAccess(update_commands.ptr, &.{agent_info.agent});
+
+    const completion_signal = try instance.createSignal(1, &.{});
+    errdefer instance.destroySignal(completion_signal);
+
+    return Self{
+        .start_packet = hsa.Pm4IndirectBufferPacket.init(start_commands, null),
+        .stop_packet = hsa.Pm4IndirectBufferPacket.init(stop_commands, completion_signal),
+        .update_packet = undefined, // Set in update().
         .output_buffer = output_buffer,
         .start_commands = start_commands,
         .stop_commands = stop_commands,
-        .completion_signal = try instance.createSignal(1, &.{}),
+        .update_commands = update_commands,
     };
-    return self;
 }
 
 pub fn deinit(self: *Self, instance: *const hsa.Instance) void {
     instance.memoryPoolFree(self.output_buffer.ptr);
-    instance.memoryPoolFree(self.start_commands);
-    instance.memoryPoolFree(self.stop_commands);
-    instance.destroySignal(self.completion_signal);
+    instance.memoryPoolFree(self.start_commands.ptr);
+    instance.memoryPoolFree(self.stop_commands.ptr);
+    instance.memoryPoolFree(self.update_commands.ptr);
+    instance.destroySignal(self.stop_packet.completion_signal);
     self.* = undefined;
+}
+
+/// Update the SQTT token. This should be invoked before a new kernel is launched to update its state.
+/// The resulting packet should be submitted, and the corresponding signal should be waited on and
+/// reset before calling this function again.
+pub fn update(
+    self: *Self,
+    kernel_name: []const u8,
+    code_object_hash: u64,
+    wgp_count_x: u32,
+    wgp_count_y: u32,
+    wgp_count_z: u32,
+) *const hsa.Pm4IndirectBufferPacket {
+    var cmdbuf = CmdBuf{
+        .cap = @intCast(u32, self.update_commands.len),
+        .buf = self.update_commands.ptr,
+    };
+
+    cmdbuf.sqttMarker(sqtt.marker.PipelineBind, &.{
+        .extra_dwords = 0,
+        .bind_point = .compute,
+        .cmdbuf_id = 0, // TODO?
+        .api_pso_hash = code_object_hash,
+    });
+
+    var name_marker = sqtt.marker.UserEventWithString{
+        .user_event = .{
+            .extra_dwords = 0,
+            .data_type = .object_name,
+        },
+        .str_len = @intCast(u32, kernel_name.len),
+        .str_data = .{0} ** 1024,
+    };
+    // TODO: Check size and bound.
+    std.mem.copy(u8, &name_marker.str_data, kernel_name);
+    cmdbuf.sqttDataMarker(@ptrCast([*]const pm4.Word, &name_marker)[0 .. @sizeOf(sqtt.marker.UserEvent) / @sizeOf(pm4.Word) + 1 + (std.math.divCeil(u32, @intCast(u32, kernel_name.len), 4) catch unreachable)]);
+
+    cmdbuf.sqttMarker(sqtt.marker.EventWithDims, &.{
+        .event = .{
+            .extra_dwords = 0,
+            .api_type = .cmd_nd_range_kernel,
+            .cmd_id = 0, // TODO
+            .cmdbuf_id = 0, // TODO?
+            .has_thread_dims = true,
+        },
+        .wgp_count_x = wgp_count_x,
+        .wgp_count_y = wgp_count_y,
+        .wgp_count_z = wgp_count_z,
+    });
+
+    // just reuse the signal here. TODO: allocate a new one?
+    self.update_packet = hsa.Pm4IndirectBufferPacket.init(cmdbuf.words(), self.stop_packet.completion_signal);
+    return &self.update_packet;
 }
 
 fn threadTraceBufferSize(shader_engines: u32, per_trace_buffer_size: u32) u32 {
@@ -208,7 +276,7 @@ fn startCommands(
             .token_exclude = .{
                 .perf = true,
             },
-            .bop_events_token_include = false,
+            .bop_events_token_include = true,
             .reg_include = .{
                 .sqdec = true,
                 .shdec = true,
@@ -219,7 +287,7 @@ fn startCommands(
             },
             .inst_exclude = 0,
             .reg_exclude = 0,
-            .reg_detail_all = 0,
+            .reg_detail_all = false,
         });
 
         cmdbuf.setPrivilegedConfigReg(.sqtt_ctrl, .{
@@ -252,45 +320,6 @@ fn startCommands(
     cmdbuf.setShReg(.compute_thread_trace_enable, .{
         .enable = true,
     });
-
-    // Put these here for now, but we are probably going to need to find a better place for it.
-    // {
-    //     const marker = sqtt.marker.PipelineBind{
-    //         .extra_dwords = 0,
-    //         .bind_point = .compute,
-    //         .cmdbuf_id = 0,
-    //         .api_pso_hash = 0x5016d2d1a9c23cfa, // TODO: Dont hardcode
-    //     };
-    //     cmdbuf.sqttMarker(@ptrCast(*const [2]pm4.Word, &marker));
-    // }
-    // {
-    //     const name = "kernel_name_here";
-    //     var marker = sqtt.marker.UserEventWithString{
-    //         .user_event = .{
-    //             .extra_dwords = 0,
-    //             .data_type = .object_name,
-    //         },
-    //         .str_len = name.len,
-    //         .str_data = undefined,
-    //     };
-    //     std.mem.copy(u8, &marker.str_data, name);
-    //     cmdbuf.sqttMarker(@ptrCast([*]const pm4.Word, &marker)[0..@sizeOf(sqtt.marker.UserEvent) + std.mem.alignForward(name.len, 4)]);
-    // }
-    // {
-    //    var marker = sqtt.marker.EventWithDims{
-    //        .event = .{
-    //            .extra_dwords = 0,
-    //            .api_type = .cmd_nd_range_kernel,
-    //            .cmd_id = 0, // TODO
-    //            .cmdbuf_id = 0, // ?
-    //            .has_thread_dims = true,
-    //        },
-    //        .work_group_size_x = 256,
-    //        .work_group_size_y = 0,
-    //        .work_group_size_z = 0,
-    //    };
-    //    cmdbuf.sqttMarker(@ptrCast(*const [6]pm4.Word, &marker));
-    // }
 
     return cmdbuf.words();
 }
@@ -433,14 +462,9 @@ fn stopCommands(
 pub fn read(self: *Self, a: Allocator, agent_info: AgentInfo) ![]Trace {
     const shader_engines = agent_info.properties.shader_engines;
     const output_va = @ptrToInt(self.output_buffer.ptr);
+    var shader_engine: u32 = 0;
     var traces = std.ArrayList(Trace).init(a);
     defer traces.deinit();
-
-    // const buffer_size = threadTraceBufferSize(shader_engines, thread_trace_buffer_size);
-
-    std.log.debug("shader engines: {}", .{shader_engines});
-
-    var shader_engine: u32 = 0;
     while (shader_engine < shader_engines) : (shader_engine += 1) {
         // Note: logic for selecting SEs and CUs to use should be kept the same as in startCommands.
         const info_va = output_va + threadTraceInfoOffset(shader_engine);
@@ -450,6 +474,8 @@ pub fn read(self: *Self, a: Allocator, agent_info: AgentInfo) ![]Trace {
         // Data pointer is mapped to CPU, so we can just copy it directly.
         const info = @intToPtr(*const ThreadTraceInfo, info_va);
         const data = @intToPtr([*]const u8, data_va)[0 .. info.cur_offset * 32];
+
+        std.log.debug("se {}: trace used {} out of {} bytes", .{ shader_engine, data.len, thread_trace_buffer_size });
 
         try traces.append(.{
             .info = info.*,

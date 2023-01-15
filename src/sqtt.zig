@@ -201,9 +201,8 @@ pub const ApiInfo = extern struct {
         api_pso_data: extern struct {
             api_pso_filter: u64,
         },
-        user_marker_data: extern struct {
-            start: [256]u8,
-            end: [256]u8,
+        shader_engine_filter: extern struct {
+            mask: u32,
         },
     };
 
@@ -341,9 +340,9 @@ pub const marker = struct {
 
     pub const EventWithDims = packed struct(u192) {
         event: Event,
-        work_group_size_x: u32,
-        work_group_size_y: u32,
-        work_group_size_z: u32,
+        wgp_count_x: u32,
+        wgp_count_y: u32,
+        wgp_count_z: u32,
     };
 
     pub const BindPoint = enum(u1) {

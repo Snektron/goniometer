@@ -5,7 +5,6 @@ const elf = @import("elf.zig");
 const hsa = @import("hsa.zig");
 const rgp = @import("rgp.zig");
 const pm4 = @import("pm4.zig");
-const sqtt = @import("sqtt.zig");
 const ThreadTrace = @import("ThreadTrace.zig");
 
 const stop_trace_signal_timeout_ns = std.time.ns_per_s * 10;
@@ -25,18 +24,9 @@ pub const ProfileQueue = struct {
     /// Thread trace data.
     thread_trace: ThreadTrace,
 
+    /// Get a handle to the packet buffer of this profile queue.
     pub fn packetBuffer(self: *ProfileQueue) []align(hsa.Packet.alignment) hsa.Packet {
-        return @ptrCast(
-            [*]align(hsa.Packet.alignment) hsa.Packet,
-            @alignCast(hsa.Packet.alignment, self.queue.base_address.?),
-        )[0..self.queue.size];
-    }
-
-    fn backingPacketBuffer(self: *ProfileQueue) []align(hsa.Packet.alignment) hsa.Packet {
-        return @ptrCast(
-            [*]align(hsa.Packet.alignment) hsa.Packet,
-            @alignCast(hsa.Packet.alignment, self.backing_queue.base_address.?),
-        )[0..self.backing_queue.size];
+        return hsa.queuePacketBuffer(&self.queue);
     }
 };
 
@@ -130,6 +120,8 @@ pub const KernelInfo = struct {
     /// This name is of form <name>.kd, so to get the neat name the
     /// suffix must be stripped.
     descriptor_name: []const u8,
+    /// The hash of the code object that this kernel belongs to.
+    code_object_hash: u64,
 
     /// Get the proper kernel name, without the descriptor suffix.
     fn name(self: KernelInfo) []const u8 {
@@ -164,7 +156,6 @@ sessions: std.ArrayListUnmanaged(Session) = .{},
 /// Code object load events. These are common for all agents, and are regardless of session.
 load_events: std.ArrayListUnmanaged(rgp.Capture.LoadEvent) = .{},
 /// The actual code objects that were encountered. The binary is owned by self.a.
-// TODO: Is this per-agent?
 code_objects: std.ArrayListUnmanaged(rgp.Capture.CodeObject) = .{},
 
 pub fn init(a: std.mem.Allocator, api_table: *const hsa.ApiTable) !Profiler {
@@ -239,11 +230,11 @@ fn queryAgentsCbk(self: *Profiler, agent: hsa.Agent) !?void {
     info.properties = .{
         .name = self.instance.getAgentInfo(agent, .name),
         .agent_type = self.instance.getAgentInfo(agent, .device_type),
-        .shader_engines = 4, // self.instance.getAgentInfo(agent, .num_shader_engines),
+        .shader_engines = self.instance.getAgentInfo(agent, .num_shader_engines),
         .vendor_name = self.instance.getAgentInfo(agent, .vendor_name),
         .product_name = self.instance.getAgentInfo(agent, .product_name),
-        .compute_units = 72, // self.instance.getAgentInfo(agent, .num_compute_units),
-        .simds_per_cu = 4, // self.instance.getAgentInfo(agent, .num_simds_per_cu),
+        .compute_units = self.instance.getAgentInfo(agent, .num_compute_units),
+        .simds_per_cu = self.instance.getAgentInfo(agent, .num_simds_per_cu),
         .cache_size = self.instance.getAgentInfo(agent, .cache_size),
         .clock_freq = self.instance.getAgentInfo(agent, .max_clock_freq),
         .chip_id = self.instance.getAgentInfo(agent, .chip_id),
@@ -388,43 +379,7 @@ pub fn destroyQueue(self: *Profiler, queue: *hsa.Queue) !void {
 /// Submit a generic packet to the backing queue of a ProfileQueue. This function may block until
 /// there is enough room for the packet.
 pub fn submit(self: *Profiler, pq: *ProfileQueue, packet: *const hsa.Packet) void {
-    const queue = pq.backing_queue;
-    const write_index = self.instance.queueAddWriteIndex(queue, 1, .AcqRel);
-
-    // Busy loop until there is space.
-    // TODO: Maybe this can be improved or something?
-    while (write_index - self.instance.queueLoadReadIndex(queue, .Monotonic) >= queue.size) {
-        continue;
-    }
-
-    const slot_index = @intCast(u32, write_index % queue.size);
-    const slot = &pq.backingPacketBuffer()[slot_index];
-
-    // AQL packets have an 'invalid' header, which indicates that there is no packet at this
-    // slot index yet - we want to overwrite that last, so that the packet is not read before
-    // it is completely written.
-    const packet_bytes = std.mem.asBytes(packet);
-    const slot_bytes = std.mem.asBytes(slot);
-    std.mem.copy(u8, slot_bytes[2..], packet_bytes[2..]);
-    // Write the packet header atomically.
-    @atomicStore(u16, @ptrCast(*u16, &slot.header), @bitCast(u16, packet.header), .Release);
-
-    // Finally, ring the doorbell to notify the agent of the updated packet.
-    self.instance.signalStore(queue.doorbell_signal, @intCast(hsa.SignalValue, write_index), .Monotonic);
-}
-
-/// Submit a PM4 command buffer to an HSA queue.
-pub fn submitPm4(
-    self: *Profiler,
-    pq: *ProfileQueue,
-    commands: []const pm4.Word,
-    completion_signal: ?hsa.Signal,
-) void {
-    var packet = hsa.Pm4IndirectBufferPacket.init(commands);
-    if (completion_signal) |signal| {
-        packet.completion_signal = signal;
-    }
-    self.submit(pq, packet.asHsaPacket());
+    self.instance.submit(pq.backing_queue, packet);
 }
 
 /// Turn an HSA queue handle into its associated ProfileQueue, if that exists.
@@ -432,26 +387,10 @@ pub fn getProfileQueue(self: *Profiler, queue: *const hsa.Queue) ?*ProfileQueue 
     return self.queues.get(queue.doorbell_signal);
 }
 
-/// Start tracing.
-pub fn startTrace(self: *Profiler, pq: *ProfileQueue) void {
-    // The stuff done in this function is mainly based on
-    // https://github.com/Mesa3D/mesa/blob/main/src/amd/vulkan/radv_sqtt.c
-    // TODO: Find out what we need to bring over. For now, we only target GFX10
-    // and the stuff from radv_emit_thread_trace_start.
-    std.log.info("starting kernel trace", .{});
-
-    self.submitPm4(pq, pq.thread_trace.start_commands, null);
-}
-
-/// Stop tracing.
-pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) !void {
-    std.log.info("stopping kernel trace", .{});
-    const signal = pq.thread_trace.completion_signal;
-    self.submitPm4(pq, pq.thread_trace.stop_commands, signal);
-
-    // Wait until the stop trace packet has been processed.
-    // TODO: Do we need this? we're going to wait until the GPU is idle during the read anyway...
+/// Utility command to wait on a signal binary and reset it immediately.
+pub fn signalWaitAndReset(self: *Profiler, signal: hsa.Signal) void {
     while (true) {
+        // TODO: Really check the timeout and stuff.
         const value = self.instance.signalWait(
             signal,
             .lt,
@@ -463,12 +402,29 @@ pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) !void {
         switch (value) {
             0 => break,
             1 => {},
-            else => std.log.err("invalid signal value", .{}),
+            else => unreachable, // Not a binary signal.
         }
     }
     self.instance.signalStore(signal, 1, .Monotonic);
+}
 
-    // const cpu_agent_info = self.agents.keys()[self.cpu_agent];
+/// Start tracing.
+pub fn startTrace(self: *Profiler, pq: *ProfileQueue) void {
+    // The stuff done in this function is mainly based on
+    // https://github.com/Mesa3D/mesa/blob/main/src/amd/vulkan/radv_sqtt.c
+    // TODO: Find out what we need to bring over. For now, we only target GFX10
+    // and the stuff from radv_emit_thread_trace_start.
+    std.log.info("starting trace", .{});
+    self.submit(pq, pq.thread_trace.start_packet.asHsaPacket());
+}
+
+/// Stop tracing.
+pub fn stopTrace(self: *Profiler, pq: *ProfileQueue) !void {
+    std.log.info("stopping trace", .{});
+
+    self.submit(pq, pq.thread_trace.stop_packet.asHsaPacket());
+    self.signalWaitAndReset(pq.thread_trace.stop_packet.completion_signal);
+
     const gpu_agent_info = self.agents.keys()[pq.agent];
     const traces = try pq.thread_trace.read(self.a, gpu_agent_info);
     defer self.a.free(traces); // Note: only the array must be freed, traces are moved.
@@ -486,18 +442,32 @@ pub fn dispatchKernel(
     pq: *ProfileQueue,
     packet: *align(hsa.Packet.alignment) const hsa.KernelDispatchPacket,
 ) void {
-    // Obtain the AMD kernel code handle for this packet.
-    // TODO: Make sure that this is a device queue?
-    const kernel_code = self.instance.loaderQueryHostAddress(
-        hsa.AmdKernelCode,
-        @intToPtr(*const hsa.AmdKernelCode, packet.kernel_object),
+    // Fetch kernel meta-information for this packet.
+    const kernel_info = self.kernels.get(packet.kernel_object) orelse {
+        std.log.err("kernel object 0x{x:0>16} was not registered, cannot trace", .{packet.kernel_object});
+        unreachable; // TODO: gracefully handle.
+    };
+
+    std.log.debug("launching kernel '{s}' with workgroup size {{{}, {}, {}}} and work size {{{}, {}, {}}}", .{
+        kernel_info.name(),
+        packet.workgroup_size_x,
+        packet.workgroup_size_y,
+        packet.workgroup_size_z,
+        packet.grid_size_x / packet.workgroup_size_x,
+        packet.grid_size_y / packet.workgroup_size_y,
+        packet.grid_size_z / packet.workgroup_size_z,
+    });
+
+    const update_packet = pq.thread_trace.update(
+        kernel_info.name(),
+        kernel_info.code_object_hash,
+        packet.grid_size_x / packet.workgroup_size_x,
+        packet.grid_size_y / packet.workgroup_size_y,
+        packet.grid_size_z / packet.workgroup_size_z,
     );
-    _ = kernel_code;
-    // std.log.debug("{}", .{kernel_code});
-
-    // There is no real pipeline bind moment in hsa so we will just use the dispatch moment
-
+    self.submit(pq, update_packet.asHsaPacket());
     self.submit(pq, @ptrCast(*align(hsa.Packet.alignment) const hsa.Packet, packet));
+    self.signalWaitAndReset(update_packet.completion_signal);
 }
 
 /// Track meta-information about an HSA executable. Should be called when
@@ -521,7 +491,7 @@ pub fn registerExecutable(self: *Profiler, exe: hsa.Executable) !void {
             break :blk binary;
         },
         else => {
-            std.log.warn("cannot load code object '{s}'", .{uri});
+            std.log.warn("cannot load code object for executable '{s}'", .{uri});
             return error.Generic;
         },
     };
@@ -535,20 +505,22 @@ pub fn registerExecutable(self: *Profiler, exe: hsa.Executable) !void {
     const text_va = elf.getSectionVirtualAddr(binary, ".text") catch return error.Generic;
     const load_delta = self.instance.getLoadedCodeObjectInfo(code_object, .load_delta);
 
-    // Quickly compute a hash from the elf file.
     const hash = std.hash.Wyhash.hash(0, binary);
+
     std.log.debug("registering executable '{s}' with hash 0x{x:0>16}", .{ uri, hash });
 
     try self.load_events.append(self.a, .{
         .event_type = .load_to_gpu_memory,
         .base_address = text_va +% @bitCast(u64, load_delta),
         .code_object_hash = hash,
-        .timestamp = @bitCast(u64, @truncate(i64, std.time.nanoTimestamp())),
+        .timestamp = @intCast(u64, std.time.nanoTimestamp()),
     });
 
-    // std.log.debug(".text va: 0x{X}, delta: 0x{X}, loaded .text va: 0x{X}", .{text_va, load_delta, real_text_va});
-
-    _ = try self.instance.iterateSymbols(exe, self, registerExecutableSymbolsCbk);
+    var ctx = RegisterExecutableSymbolsCtx{
+        .profiler = self,
+        .code_object_hash = hash,
+    };
+    _ = try self.instance.iterateSymbols(exe, &ctx, registerExecutableSymbolsCbk);
 }
 
 fn registerExecutableCodeObjectCbk(self: *Profiler, exe: hsa.Executable, co: hsa.LoadedCodeObject) !?hsa.LoadedCodeObject {
@@ -559,7 +531,13 @@ fn registerExecutableCodeObjectCbk(self: *Profiler, exe: hsa.Executable, co: hsa
     return co;
 }
 
-fn registerExecutableSymbolsCbk(self: *Profiler, exe: hsa.Executable, sym: hsa.Symbol) !?void {
+const RegisterExecutableSymbolsCtx = struct {
+    profiler: *Profiler,
+    code_object_hash: u64,
+};
+
+fn registerExecutableSymbolsCbk(ctx: *RegisterExecutableSymbolsCtx, exe: hsa.Executable, sym: hsa.Symbol) !?void {
+    const self = ctx.profiler;
     _ = exe;
     const kind = self.instance.getSymbolInfo(sym, .kind);
     if (kind != .kernel)
@@ -577,7 +555,9 @@ fn registerExecutableSymbolsCbk(self: *Profiler, exe: hsa.Executable, sym: hsa.S
 
     result.value_ptr.* = .{
         .descriptor_name = name,
+        .code_object_hash = ctx.code_object_hash,
     };
+    std.log.debug("executable with kernel name '{s}' and kernel object 0x{x:0>16}", .{ result.value_ptr.name(), kernel_object });
 
     return null;
 }

@@ -129,12 +129,13 @@ pub const PrivilegedRegister = enum(u16) {
                 size: u24,
             },
             .sqtt_mask => packed struct(u32) {
-                simd_sel: u2, // bits 0-2
+                simd_sel: u2,
                 _reserved1: u2 = 0,
-                wgp_sel: u4, // bits 4-8
-                sa_sel: u1, // bit 9
-                wtype_include: u7, // bits 10-17
-                _reserved2: u16 = 0,
+                wgp_sel: u4,
+                _reserved2: u1 = 0,
+                sa_sel: u1,
+                wtype_include: u7,
+                _reserved3: u15 = 0,
             },
             .sqtt_token_mask => packed struct(u32) {
                 pub const TokenExclude = packed struct(u12) {
@@ -142,7 +143,7 @@ pub const PrivilegedRegister = enum(u16) {
                     aluexec: bool = false,
                     valuinst: bool = false,
                     waverdy: bool = false,
-                    immed1: bool = false,
+                    wavestartend: bool = false,
                     immediate: bool = false,
                     reg: bool = false,
                     event: bool = false,
@@ -168,15 +169,15 @@ pub const PrivilegedRegister = enum(u16) {
                 _reserved1: u3 = 0,
                 reg_include: RegInclude,
                 inst_exclude: u3,
-                _resreved2: u1 = 0,
+                _reserved2: u1 = 0,
                 reg_exclude: u3,
-                reg_detail_all: u1,
+                reg_detail_all: bool,
             },
             .sqtt_ctrl => packed struct(u32) {
                 mode: u2 = 0,
                 all_vmid: bool = false,
                 ch_perf_en: bool = false,
-                interript_en: bool = false,
+                interrupt_en: bool = false,
                 double_buffer: bool = false,
                 hiwater: u3 = 0,
                 reg_stall_en: bool = false,
