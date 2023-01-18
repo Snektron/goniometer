@@ -19,7 +19,7 @@ pub fn log(
         return;
 
     const prefix = comptime level.asText();
-    std.debug.print("(cycle profiler) " ++ prefix ++ ": " ++ format ++ "\n", args);
+    std.debug.print("(goniometer) " ++ prefix ++ ": " ++ format ++ "\n", args);
 }
 
 fn queueCreate(
@@ -154,13 +154,13 @@ export fn OnLoad(
     _ = failed_tool_names;
     _ = runtime_version;
 
-    if (std.os.getenv("CYCLE_PROFILER_LOG")) |level| {
+    if (std.os.getenv("GONIOMETER_LOG")) |level| {
         log_level = std.meta.stringToEnum(std.log.Level, level) orelse .info;
     }
 
-    std.log.info("loading cycle profiler", .{});
+    std.log.info("loading goniometer", .{});
     profiler = Profiler.init(std.heap.c_allocator, table) catch |err| {
-        std.log.err("failed to load cycle profiler: {s}", .{@errorName(err)});
+        std.log.err("failed to load goniometer: {s}", .{@errorName(err)});
         return false;
     };
 

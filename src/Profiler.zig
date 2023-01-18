@@ -573,7 +573,7 @@ pub fn unregisterExecutable(self: *Profiler, exe: hsa.Executable) void {
 /// Save the current profiling information as an RGP trace.
 /// `basename` is the capture's basename. It will be saved as `basename-<gpu-index>.rgp`.
 /// `gpu-index` does NOT correlate to anything.
-// TODO: Make cycle profiler have consistent GPU indices, and only profile specified
+// TODO: Make goniometer have consistent GPU indices, and only profile specified
 // GPUs or something.
 pub fn save(self: *Profiler, basename: []const u8) !void {
     const cpu_agent_info = self.agents.keys()[self.cpu_agent];
