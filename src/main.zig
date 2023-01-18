@@ -48,8 +48,20 @@ fn queueCreate(
     return hsa.c.HSA_STATUS_SUCCESS;
 }
 
+fn executableFreeze(exe: hsa.Executable, options: [*c]const u8) callconv(.C) hsa.Status {
+    profiler.registerExecutable(exe) catch |err| {
+        std.log.err("failed to register executable: {s}", .{@errorName(err)});
+        return hsa.toStatus(err);
+    };
+    return profiler.instance.executable_freeze(exe, options);
+}
+
+fn executableDestroy(exe: hsa.Executable) callconv(.C) hsa.Status {
+    profiler.unregisterExecutable(exe);
+    return profiler.instance.executable_destroy(exe);
+}
+
 fn queueDestroy(queue: [*c]hsa.Queue) callconv(.C) hsa.Status {
-    // TODO: Thread safety
     profiler.destroyQueue(queue) catch |err| switch (err) {
         error.InvalidQueue => std.log.err("application tried to destroy an invalid queue", .{}),
     };
@@ -64,77 +76,67 @@ fn queueSetProfingEnabled(queue: [*c]hsa.Queue, enable: c_int) callconv(.C) hsa.
     }
 }
 
-fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) void {
-    const pq = profiler.queues.get(signal) orelse {
-        // No such queue, so this is probably a signal for something else.
-        profiler.instance.signal_store_relaxed(signal, queue_index);
-        return;
-    };
-
-    const begin = @atomicRmw(u64, &pq.read_index, .Xchg, @intCast(u64, queue_index + 1), .Monotonic);
-    const end = @atomicLoad(u64, &pq.write_index, .Monotonic);
-
-    const packet_buf = pq.packetBuffer();
-    var i = begin;
-    while (i < end) : (i += 1) {
-        const index = i % pq.queue.size;
-        const packet = &packet_buf[index];
-        if (packet.cast(.kernel_dispatch)) |kernel_dispatch_packet| {
-            profiler.startTrace(pq);
-            profiler.dispatchKernel(pq, kernel_dispatch_packet);
-            profiler.stopTrace(pq) catch |err| {
-                std.log.err("failed to read thread trace: {s}", .{@errorName(err)});
+fn queue_intercept(comptime order: std.builtin.AtomicOrder) type {
+    return struct {
+        fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) void {
+            const pq = profiler.queues.get(signal) orelse {
+                // No such queue, so this is probably a signal for something else.
+                profiler.instance.signalStore(signal, queue_index, order);
+                return;
             };
-            submit_nr += 1;
-        } else {
-            profiler.submit(pq, packet);
+
+            const begin = @atomicRmw(u64, &pq.read_index, .Xchg, @intCast(u64, queue_index + 1), .Monotonic);
+            const end = @atomicLoad(u64, &pq.write_index, .Monotonic);
+
+            const packet_buf = pq.packetBuffer();
+            var i = begin;
+            while (i < end) : (i += 1) {
+                const index = i % pq.queue.size;
+                const packet = &packet_buf[index];
+                if (packet.cast(.kernel_dispatch)) |kernel_dispatch_packet| {
+                    profiler.startTrace(pq);
+                    profiler.dispatchKernel(pq, kernel_dispatch_packet);
+                    profiler.stopTrace(pq) catch |err| {
+                        std.log.err("failed to read thread trace: {s}", .{@errorName(err)});
+                    };
+                } else {
+                    profiler.submit(pq, packet);
+                }
+            }
         }
-    }
-}
 
-fn executableFreeze(exe: hsa.Executable, options: [*c]const u8) callconv(.C) hsa.Status {
-    profiler.registerExecutable(exe) catch |err| {
-        std.log.err("failed to register executable: {s}", .{@errorName(err)});
-        return hsa.toStatus(err);
+        fn loadQueueReadIndex(queue: [*c]const hsa.Queue) callconv(.C) u64 {
+            if (profiler.getProfileQueue(queue)) |pq| {
+                return @atomicLoad(u64, &pq.read_index, order);
+            } else {
+                return profiler.instance.queueLoadReadIndex(queue, order);
+            }
+        }
+
+        fn loadQueueWriteIndex(queue: [*c]const hsa.Queue) callconv(.C) u64 {
+            if (profiler.getProfileQueue(queue)) |pq| {
+                return @atomicLoad(u64, &pq.write_index, order);
+            } else {
+                return profiler.instance.queueLoadWriteIndex(queue, order);
+            }
+        }
+
+        fn storeQueueWriteIndex(queue: [*c]const hsa.Queue, value: u64) callconv(.C) void {
+            if (profiler.getProfileQueue(queue)) |pq| {
+                @atomicStore(u64, &pq.write_index, value, order);
+            } else {
+                profiler.instance.queueStoreWriteIndex(queue, value, order);
+            }
+        }
+
+        fn addQueueWriteIndex(queue: [*c]const hsa.Queue, value: u64) callconv(.C) u64 {
+            if (profiler.getProfileQueue(queue)) |pq| {
+                return @atomicRmw(u64, &pq.write_index, .Add, value, order);
+            } else {
+                return profiler.instance.queueAddWriteIndex(queue, value, order);
+            }
+        }
     };
-    return profiler.instance.executable_freeze(exe, options);
-}
-
-fn executableDestroy(exe: hsa.Executable) callconv(.C) hsa.Status {
-    profiler.unregisterExecutable(exe);
-    return profiler.instance.executable_destroy(exe);
-}
-
-fn loadQueueReadIndex(queue: [*c]const hsa.Queue) callconv(.C) u64 {
-    if (profiler.getProfileQueue(queue)) |pq| {
-        return @atomicLoad(u64, &pq.read_index, .Monotonic);
-    } else {
-        return profiler.instance.queue_load_read_index_relaxed(queue);
-    }
-}
-
-fn loadQueueWriteIndex(queue: [*c]const hsa.Queue) callconv(.C) u64 {
-    if (profiler.getProfileQueue(queue)) |pq| {
-        return @atomicLoad(u64, &pq.write_index, .Monotonic);
-    } else {
-        return profiler.instance.queue_load_write_index_relaxed(queue);
-    }
-}
-
-fn storeQueueWriteIndex(queue: [*c]const hsa.Queue, value: u64) callconv(.C) void {
-    if (profiler.getProfileQueue(queue)) |pq| {
-        @atomicStore(u64, &pq.write_index, value, .Monotonic);
-    } else {
-        profiler.instance.queue_store_write_index_relaxed(queue, value);
-    }
-}
-
-fn addQueueWriteIndex(queue: [*c]const hsa.Queue, value: u64) callconv(.C) u64 {
-    if (profiler.getProfileQueue(queue)) |pq| {
-        return @atomicRmw(u64, &pq.write_index, .Add, value, .Monotonic);
-    } else {
-        return profiler.instance.queue_add_write_index_relaxed(queue, value);
-    }
 }
 
 export fn OnLoad(
@@ -163,26 +165,25 @@ export fn OnLoad(
     table.core.queue_destroy = &queueDestroy;
     table.amd_ext.profiling_set_profiler_enabled = &queueSetProfingEnabled;
 
-    table.core.signal_store_relaxed = &signalStore;
-    table.core.signal_store_screlease = &signalStore;
+    table.core.signal_store_relaxed = &queue_intercept(.Monotonic).signalStore;
+    table.core.signal_store_screlease = &queue_intercept(.Release).signalStore;
+
+    table.core.queue_load_read_index_relaxed = &queue_intercept(.Monotonic).loadQueueReadIndex;
+    table.core.queue_load_read_index_scacquire = &queue_intercept(.Acquire).loadQueueReadIndex;
+
+    table.core.queue_load_write_index_relaxed = &queue_intercept(.Monotonic).loadQueueWriteIndex;
+    table.core.queue_load_write_index_scacquire = &queue_intercept(.Acquire).loadQueueWriteIndex;
+
+    table.core.queue_store_write_index_relaxed = &queue_intercept(.Monotonic).storeQueueWriteIndex;
+    table.core.queue_store_write_index_screlease = &queue_intercept(.Release).storeQueueWriteIndex;
+
+    table.core.queue_add_write_index_relaxed = &queue_intercept(.Monotonic).addQueueWriteIndex;
+    table.core.queue_add_write_index_scacq_screl = &queue_intercept(.AcqRel).addQueueWriteIndex;
+    table.core.queue_add_write_index_scacquire = &queue_intercept(.Acquire).addQueueWriteIndex;
+    table.core.queue_add_write_index_screlease = &queue_intercept(.Release).addQueueWriteIndex;
 
     table.core.executable_freeze = &executableFreeze;
     table.core.executable_destroy = &executableDestroy;
-
-    // TODO: Use the proper atomic ordering.
-    table.core.queue_load_read_index_relaxed = &loadQueueReadIndex;
-    table.core.queue_load_read_index_scacquire = &loadQueueReadIndex;
-
-    table.core.queue_load_write_index_relaxed = &loadQueueWriteIndex;
-    table.core.queue_load_write_index_scacquire = &loadQueueWriteIndex;
-
-    table.core.queue_store_write_index_relaxed = &storeQueueWriteIndex;
-    table.core.queue_store_write_index_screlease = &storeQueueWriteIndex;
-
-    table.core.queue_add_write_index_scacq_screl = &addQueueWriteIndex;
-    table.core.queue_add_write_index_scacquire = &addQueueWriteIndex;
-    table.core.queue_add_write_index_relaxed = &addQueueWriteIndex;
-    table.core.queue_add_write_index_screlease = &addQueueWriteIndex;
 
     return true;
 }

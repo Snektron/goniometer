@@ -418,16 +418,22 @@ pub const Instance = struct {
     /// Core functionality.
     agent_get_info: *const @TypeOf(c.hsa_agent_get_info),
     iterate_agents: *const @TypeOf(c.hsa_iterate_agents),
-    queue_add_write_index_relaxed: *const @TypeOf(c.hsa_queue_add_write_index_relaxed),
-    queue_add_write_index_scacq_screl: *const @TypeOf(c.hsa_queue_add_write_index_scacq_screl),
     queue_create: *const @TypeOf(c.hsa_queue_create),
     queue_destroy: *const @TypeOf(c.hsa_queue_destroy),
     queue_load_read_index_relaxed: *const @TypeOf(c.hsa_queue_load_read_index_relaxed),
+    queue_load_read_index_scacquire: *const @TypeOf(c.hsa_queue_load_read_index_scacquire),
     queue_load_write_index_relaxed: *const @TypeOf(c.hsa_queue_load_write_index_relaxed),
+    queue_load_write_index_scacquire: *const @TypeOf(c.hsa_queue_load_write_index_scacquire),
     queue_store_write_index_relaxed: *const @TypeOf(c.hsa_queue_store_write_index_relaxed),
+    queue_store_write_index_screlease: *const @TypeOf(c.hsa_queue_store_write_index_screlease),
+    queue_add_write_index_relaxed: *const @TypeOf(c.hsa_queue_add_write_index_relaxed),
+    queue_add_write_index_scacq_screl: *const @TypeOf(c.hsa_queue_add_write_index_scacq_screl),
+    queue_add_write_index_scacquire: *const @TypeOf(c.hsa_queue_add_write_index_scacquire),
+    queue_add_write_index_screlease: *const @TypeOf(c.hsa_queue_add_write_index_screlease),
     signal_create: *const @TypeOf(c.hsa_signal_create),
     signal_destroy: *const @TypeOf(c.hsa_signal_destroy),
     signal_store_relaxed: *const @TypeOf(c.hsa_signal_store_relaxed),
+    signal_store_screlease: *const @TypeOf(c.hsa_signal_store_screlease),
     signal_wait_scacquire: *const @TypeOf(c.hsa_signal_wait_scacquire),
     executable_freeze: *const @TypeOf(c.hsa_executable_freeze),
     executable_destroy: *const @TypeOf(c.hsa_executable_destroy),
@@ -462,16 +468,22 @@ pub const Instance = struct {
         return .{
             .agent_get_info = api_table.core.agent_get_info,
             .iterate_agents = api_table.core.iterate_agents,
-            .queue_add_write_index_relaxed = api_table.core.queue_add_write_index_relaxed,
-            .queue_add_write_index_scacq_screl = api_table.core.queue_add_write_index_scacq_screl,
             .queue_create = api_table.core.queue_create,
             .queue_destroy = api_table.core.queue_destroy,
             .queue_load_read_index_relaxed = api_table.core.queue_load_read_index_relaxed,
+            .queue_load_read_index_scacquire = api_table.core.queue_load_read_index_scacquire,
             .queue_load_write_index_relaxed = api_table.core.queue_load_write_index_relaxed,
+            .queue_load_write_index_scacquire = api_table.core.queue_load_write_index_scacquire,
             .queue_store_write_index_relaxed = api_table.core.queue_store_write_index_relaxed,
+            .queue_store_write_index_screlease = api_table.core.queue_store_write_index_screlease,
+            .queue_add_write_index_relaxed = api_table.core.queue_add_write_index_relaxed,
+            .queue_add_write_index_scacq_screl = api_table.core.queue_add_write_index_scacq_screl,
+            .queue_add_write_index_scacquire = api_table.core.queue_add_write_index_scacquire,
+            .queue_add_write_index_screlease = api_table.core.queue_add_write_index_screlease,
             .signal_create = api_table.core.signal_create,
             .signal_destroy = api_table.core.signal_destroy,
             .signal_store_relaxed = api_table.core.signal_store_relaxed,
+            .signal_store_screlease = api_table.core.signal_store_screlease,
             .signal_wait_scacquire = api_table.core.signal_wait_scacquire,
             .executable_freeze = api_table.core.executable_freeze,
             .executable_destroy = api_table.core.executable_destroy,
@@ -624,12 +636,12 @@ pub const Instance = struct {
 
     pub fn queueLoadReadIndex(
         self: *const Instance,
-        queue: *Queue,
+        queue: *const Queue,
         comptime ordering: AtomicOrder,
     ) u64 {
         const func = comptime switch (ordering) {
             .Monotonic => self.queue_load_read_index_relaxed,
-            .Acquire => unreachable, // TODO: add
+            .Acquire => self.queue_load_read_index_scacquire,
             else => unreachable, // Invalid memory ordering.
         };
         return func(queue);
@@ -637,12 +649,12 @@ pub const Instance = struct {
 
     pub fn queueLoadWriteIndex(
         self: *const Instance,
-        queue: *Queue,
+        queue: *const Queue,
         comptime ordering: AtomicOrder,
     ) u64 {
         const func = comptime switch (ordering) {
             .Monotonic => self.queue_load_write_index_relaxed,
-            .Acquire => unreachable, // TODO: add
+            .Acquire => self.queue_load_write_index_scacquire,
             else => unreachable, // Invalid memory ordering.
         };
         return func(queue);
@@ -650,13 +662,13 @@ pub const Instance = struct {
 
     pub fn queueStoreWriteIndex(
         self: *const Instance,
-        queue: *Queue,
+        queue: *const Queue,
         value: u64,
         comptime ordering: AtomicOrder,
     ) void {
         const func = comptime switch (ordering) {
             .Monotonic => self.queue_store_write_index_relaxed,
-            .Release => unreachable, // TODO: add
+            .Release => self.queue_store_write_index_screlease,
             else => unreachable, // Invalid memory ordering.
         };
         func(queue, value);
@@ -664,13 +676,15 @@ pub const Instance = struct {
 
     pub fn queueAddWriteIndex(
         self: *const Instance,
-        queue: *Queue,
+        queue: *const Queue,
         value: u64,
         comptime ordering: AtomicOrder,
     ) u64 {
         const func = comptime switch (ordering) {
             .Monotonic => self.queue_add_write_index_relaxed,
             .AcqRel => self.queue_add_write_index_scacq_screl,
+            .Acquire => self.queue_add_write_index_scacquire,
+            .Release => self.queue_add_write_index_screlease,
             else => unreachable, // Invalid memory ordering.
         };
         return func(queue, value);
@@ -714,7 +728,7 @@ pub const Instance = struct {
     ) void {
         const func = comptime switch (ordering) {
             .Monotonic => self.signal_store_relaxed,
-            .Release => unreachable, // TODO: add
+            .Release => self.signal_store_screlease,
             else => unreachable, // Invalid memory ordering.
         };
         func(signal, value);
