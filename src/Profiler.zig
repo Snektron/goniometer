@@ -28,6 +28,32 @@ pub const ProfileQueue = struct {
     pub fn packetBuffer(self: *ProfileQueue) []align(hsa.Packet.alignment) hsa.Packet {
         return hsa.queuePacketBuffer(&self.queue);
     }
+
+    pub const HashContext = struct {
+        pub fn hash(self: @This(), pq: *ProfileQueue) u32 {
+            _ = self;
+            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&pq.queue.doorbell_signal.handle)));
+        }
+
+        pub fn eql(self: @This(), a: *ProfileQueue, b: *ProfileQueue, b_index: usize) bool {
+            _ = self;
+            _ = b_index;
+            return a.queue.doorbell_signal.handle == b.queue.doorbell_signal.handle;
+        }
+    };
+
+    pub const HashContextByDoorbell = struct {
+        pub fn hash(self: @This(), doorbell: hsa.Signal) u32 {
+            _ = self;
+            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&doorbell.handle)));
+        }
+
+        pub fn eql(self: @This(), doorbell: hsa.Signal, pq: *ProfileQueue, b_index: usize) bool {
+            _ = self;
+            _ = b_index;
+            return doorbell.handle == pq.queue.doorbell_signal.handle;
+        }
+    };
 };
 
 /// Meta-information tho avoid having it to query all the time.
@@ -145,8 +171,7 @@ agents: std.ArrayHashMapUnmanaged(AgentInfo, void, AgentInfo.HashContext, true) 
 /// shared memory etc. Index into `agents`.
 cpu_agent: u32,
 /// A map of queue handles to queue proxy queues. A queue is identified by its doorbell signal.
-/// TODO: we can get rid of the duplicate signal handle by using a context.
-queues: std.AutoArrayHashMapUnmanaged(hsa.Signal, *ProfileQueue) = .{},
+queues: std.ArrayHashMapUnmanaged(*ProfileQueue, void, ProfileQueue.HashContext, true) = .{},
 /// A map of loaded kernels, indexed by kernel code handle.
 kernels: std.AutoArrayHashMapUnmanaged(u64, KernelInfo) = .{},
 /// A list of tracing sessions. Currently, we just have one
@@ -169,8 +194,9 @@ pub fn init(a: std.mem.Allocator, api_table: *const hsa.ApiTable) !Profiler {
 }
 
 pub fn deinit(self: *Profiler) void {
-    for (self.queues.values()) |pq| {
+    for (self.queues.keys()) |pq| {
         pq.thread_trace.deinit(&self.instance);
+        self.a.destroy(pq);
     }
 
     for (self.kernels.values()) |info| {
@@ -357,12 +383,7 @@ pub fn createQueue(
         .thread_trace = thread_trace,
     };
 
-    const result = try self.queues.getOrPut(self.a, doorbell);
-    if (result.found_existing) {
-        // Should never happen.
-        unreachable;
-    }
-    result.value_ptr.* = pq;
+    std.debug.assert(try self.queues.fetchPut(self.a, pq, {}) == null);
     return &pq.queue;
 }
 
@@ -384,7 +405,12 @@ pub fn submit(self: *Profiler, pq: *ProfileQueue, packet: *const hsa.Packet) voi
 
 /// Turn an HSA queue handle into its associated ProfileQueue, if that exists.
 pub fn getProfileQueue(self: *Profiler, queue: *const hsa.Queue) ?*ProfileQueue {
-    return self.queues.get(queue.doorbell_signal);
+    return self.getProfileQueueByDoorbell(queue.doorbell_signal);
+}
+
+/// Get a profile queue that corresponds to a particular doorbell
+pub fn getProfileQueueByDoorbell(self: *Profiler, doorbell: hsa.Signal) ?*ProfileQueue {
+    return self.queues.getKeyAdapted(doorbell, ProfileQueue.HashContextByDoorbell{});
 }
 
 /// Utility command to wait on a signal binary and reset it immediately.

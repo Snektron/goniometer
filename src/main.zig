@@ -79,7 +79,7 @@ fn queueSetProfingEnabled(queue: [*c]hsa.Queue, enable: c_int) callconv(.C) hsa.
 fn queue_intercept(comptime order: std.builtin.AtomicOrder) type {
     return struct {
         fn signalStore(signal: hsa.Signal, queue_index: hsa.SignalValue) callconv(.C) void {
-            const pq = profiler.queues.get(signal) orelse {
+            const pq = profiler.getProfileQueueByDoorbell(signal) orelse {
                 // No such queue, so this is probably a signal for something else.
                 profiler.instance.signalStore(signal, queue_index, order);
                 return;
