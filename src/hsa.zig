@@ -585,7 +585,7 @@ pub const Instance = struct {
         };
         var ctx = S{
             .context = context,
-            .result = undefined,
+            .result = null,
         };
         _ = self.iterate_agents(S.cbk, &ctx);
         return ctx.result;
@@ -880,7 +880,7 @@ pub const Instance = struct {
         };
         var ctx = S{
             .context = context,
-            .result = undefined,
+            .result = null,
         };
         _ = self.amd_agent_iterate_memory_pools(agent, S.cbk, &ctx);
         return ctx.result;
@@ -1008,7 +1008,7 @@ pub const Instance = struct {
         };
         var ctx = S{
             .context = context,
-            .result = undefined,
+            .result = null,
         };
         _ = self.amd_loader_executable_iterate_loaded_code_objects(exe, S.cbk, &ctx);
         return ctx.result;
@@ -1306,7 +1306,7 @@ pub const CoreApiTable = extern struct {
     executable_iterate_program_symbols: *const @TypeOf(c.hsa_executable_iterate_program_symbols),
 };
 
-pub const AmdExtTable = struct {
+pub const AmdExtTable = extern struct {
     version: ApiTableVersion,
     coherency_get_type: *const @TypeOf(c.hsa_amd_coherency_get_type),
     coherency_set_type: *const @TypeOf(c.hsa_amd_coherency_set_type),
