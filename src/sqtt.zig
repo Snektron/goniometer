@@ -288,6 +288,62 @@ pub const PsoCorrelation = extern struct {
     record_count: u32,
 };
 
+pub const QueueEventTimings = extern struct {
+    pub const QueueType = enum(u8) {
+        unknown = 0x0,
+        universal = 0x1,
+        compute = 0x2,
+        dma = 0x3,
+    };
+
+    pub const EngineType = enum(u8) {
+        unknown = 0x0,
+        universal = 0x1,
+        compute = 0x2,
+        exclusive_compute = 0x3,
+        dma = 0x4,
+        high_priority_universal = 0x7,
+        high_priority_compute = 0x8,
+    };
+
+    pub const QueueHardwareInfo = packed struct(u32) {
+        queue_type: QueueType,
+        engine_type: EngineType,
+        _reserved: u16 = 0,
+    };
+
+    pub const QueueInfoRecord = extern struct {
+        queue_id: u64,
+        queue_context: u64,
+        hardware_info: QueueHardwareInfo,
+        _reserved: u32 = 0,
+    };
+
+    pub const QueueEventType = enum(u32) {
+        cmdbuf_submit = 0x0,
+        signal_semaphore = 0x1,
+        wait_semaphore = 0x2,
+        present = 0x3,
+    };
+
+    pub const QueueEventRecord = extern struct {
+        event_type: QueueEventType,
+        sqtt_cmdbuf_id: u32, // corresponds to marker.Event.cmdbuf_id, maybe.
+        frame_index: u32,
+        queue_info_index: u32,
+        submit_sub_index: u32,
+        api_id: u64,
+        cpu_timestamp: u64,
+        gpu_timestamp: [2]u64,
+    };
+
+    header: ChunkHeader,
+    queue_info_record_count: u32,
+    queue_info_record_size: u32,
+    queue_event_record_count: u32,
+    queue_event_record_size: u32,
+};
+
 pub const marker = struct {
     /// Note: the meaning of the marker identifier depends on the API that is being used. This type
     /// is specifically for HIP/OpenCL.

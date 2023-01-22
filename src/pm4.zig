@@ -210,8 +210,8 @@ pub const PrivilegedRegister = enum(u16) {
     }
 };
 
-// Apparently there are multiple types of this packet, depending on
-// engine type. This is the "compute" version.
+/// Apparently there are multiple types of this packet, depending on
+/// engine type. This is the "compute" version.
 pub const IndirectBuffer = packed struct(u96) {
     swap: u2,
     ib_base: u62,

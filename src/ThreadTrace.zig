@@ -50,8 +50,6 @@ pub const Trace = struct {
     }
 };
 
-output_buffer: []u8,
-
 /// The start packets. They are here to avoid having to reconstruct them.
 start_packet: hsa.Pm4IndirectBufferPacket,
 /// The stop packet. Note: has a signal that should be used to wait on this packet.
@@ -64,6 +62,8 @@ update_packet: hsa.Pm4IndirectBufferPacket,
 start_commands: []pm4.Word,
 stop_commands: []pm4.Word,
 update_commands: []pm4.Word,
+/// The buffer to which the final SQTT thread trace will be written to, from the GPU.
+output_buffer: []u8,
 /// Command number counter
 cmd_id: u32,
 
@@ -72,6 +72,8 @@ pub fn init(
     cpu_pool: hsa.MemoryPool,
     agent_info: AgentInfo,
 ) !Self {
+    // TODO: Consolidate allocations.
+
     const output_buffer = try instance.memoryPoolAllocate(
         u8,
         cpu_pool,
@@ -80,8 +82,6 @@ pub fn init(
     std.mem.set(u8, output_buffer, 0);
     errdefer instance.memoryPoolFree(output_buffer);
     instance.agentsAllowAccess(output_buffer.ptr, &.{agent_info.agent});
-
-    // TODO: Consolidate command buffer allocations.
 
     const start_commands = try startCommands(instance, cpu_pool, agent_info.properties.shader_engines, output_buffer);
     errdefer instance.memoryPoolFree(start_commands);
@@ -168,8 +168,7 @@ pub fn update(
     });
     self.cmd_id +%= 1;
 
-    // just reuse the signal here. TODO: allocate a new one?
-    self.update_packet = hsa.Pm4IndirectBufferPacket.init(cmdbuf.words(), self.stop_packet.completion_signal);
+    self.update_packet = hsa.Pm4IndirectBufferPacket.init(cmdbuf.words(), null);
     return &self.update_packet;
 }
 

@@ -24,6 +24,7 @@ pub const Symbol = c.hsa_executable_symbol_t;
 pub const MemoryPool = c.hsa_amd_memory_pool_t;
 pub const KernelDispatchPacket = c.hsa_kernel_dispatch_packet_t;
 pub const LoadedCodeObject = c.hsa_loaded_code_object_t;
+pub const ProfilingDispatchTime = c.hsa_amd_profiling_dispatch_time_t;
 
 pub const AmdKernelCode = extern struct {
     pub const MachineKind = enum(u16) {
@@ -162,7 +163,17 @@ pub const DeviceType = enum(c_int) {
     _,
 };
 
-pub const Attribute = enum(c_int) {
+pub const SystemAttribute = enum(c_int) {
+    timestamp_freq = 3,
+
+    pub fn Type(comptime self: SystemAttribute) type {
+        return switch (self) {
+            .timestamp_freq => u64,
+        };
+    }
+};
+
+pub const AgentAttribute = enum(c_int) {
     name = c.HSA_AGENT_INFO_NAME,
     vendor_name = c.HSA_AGENT_INFO_VENDOR_NAME,
     device_type = c.HSA_AGENT_INFO_DEVICE,
@@ -181,7 +192,7 @@ pub const Attribute = enum(c_int) {
     memory_width = c.HSA_AMD_AGENT_INFO_MEMORY_WIDTH,
     chip_id = c.HSA_AMD_AGENT_INFO_CHIP_ID,
 
-    pub fn Type(comptime self: Attribute) type {
+    pub fn Type(comptime self: AgentAttribute) type {
         return switch (self) {
             .name => [64]u8,
             .vendor_name => [64]u8,
@@ -416,6 +427,7 @@ pub fn queuePacketBuffer(queue: *Queue) []align(Packet.alignment) Packet {
 /// we care about, as well as Zig-like wrapper functions.
 pub const Instance = struct {
     /// Core functionality.
+    system_get_info: *const @TypeOf(c.hsa_system_get_info),
     agent_get_info: *const @TypeOf(c.hsa_agent_get_info),
     iterate_agents: *const @TypeOf(c.hsa_iterate_agents),
     queue_create: *const @TypeOf(c.hsa_queue_create),
@@ -447,6 +459,8 @@ pub const Instance = struct {
     amd_memory_pool_free: *const @TypeOf(c.hsa_amd_memory_pool_free),
     amd_memory_pool_get_info: *const @TypeOf(c.hsa_amd_memory_pool_get_info),
     amd_profiling_set_profiler_enabled: *const @TypeOf(c.hsa_amd_profiling_set_profiler_enabled),
+    amd_profiling_get_dispatch_time: *const @TypeOf(c.hsa_amd_profiling_get_dispatch_time),
+    amd_profiling_convert_tick_to_system_domain: *const @TypeOf(c.hsa_amd_profiling_convert_tick_to_system_domain),
     amd_loader_query_host_address: *const @TypeOf(c.hsa_ven_amd_loader_query_host_address),
     amd_loader_executable_iterate_loaded_code_objects: *const @TypeOf(c.hsa_ven_amd_loader_executable_iterate_loaded_code_objects),
     amd_loader_loaded_code_object_get_info: *const @TypeOf(c.hsa_ven_amd_loader_loaded_code_object_get_info),
@@ -466,6 +480,7 @@ pub const Instance = struct {
         }
 
         return .{
+            .system_get_info = api_table.core.system_get_info,
             .agent_get_info = api_table.core.agent_get_info,
             .iterate_agents = api_table.core.iterate_agents,
             .queue_create = api_table.core.queue_create,
@@ -496,6 +511,8 @@ pub const Instance = struct {
             .amd_memory_pool_free = api_table.amd_ext.memory_pool_free,
             .amd_memory_pool_get_info = api_table.amd_ext.memory_pool_get_info,
             .amd_profiling_set_profiler_enabled = api_table.amd_ext.profiling_set_profiler_enabled,
+            .amd_profiling_get_dispatch_time = api_table.amd_ext.profiling_get_dispatch_time,
+            .amd_profiling_convert_tick_to_system_domain = api_table.amd_ext.profiling_convert_tick_to_system_domain,
             .amd_loader_query_host_address = loader_api.hsa_ven_amd_loader_query_host_address.?,
             .amd_loader_executable_iterate_loaded_code_objects = loader_api.hsa_ven_amd_loader_executable_iterate_loaded_code_objects.?,
             .amd_loader_loaded_code_object_get_info = loader_api.hsa_ven_amd_loader_loaded_code_object_get_info.?,
@@ -537,10 +554,26 @@ pub const Instance = struct {
 
     // Wrapped API functionality //
 
+    pub fn getSystemInfo(
+        self: *const Instance,
+        comptime attribute: SystemAttribute,
+    ) attribute.Type() {
+        var value: attribute.Type() = undefined;
+        return switch (self.system_get_info(
+            @enumToInt(attribute),
+            @ptrCast(*anyopaque, &value),
+        )) {
+            c.HSA_STATUS_SUCCESS => value,
+            c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable,
+            else => unreachable, // Undocumented error.
+        };
+    }
+
     pub fn getAgentInfo(
         self: *const Instance,
         agent: Agent,
-        comptime attribute: Attribute,
+        comptime attribute: AgentAttribute,
     ) attribute.Type() {
         var value: attribute.Type() = undefined;
         return switch (self.agent_get_info(
@@ -551,7 +584,7 @@ pub const Instance = struct {
             c.HSA_STATUS_SUCCESS => value,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
             c.HSA_STATUS_ERROR_INVALID_AGENT => unreachable,
-            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with Attribute
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with AgentAttribute
             else => unreachable, // Undocumented error.
         };
     }
@@ -825,7 +858,7 @@ pub const Instance = struct {
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
             c.HSA_STATUS_ERROR_INVALID_AGENT => unreachable,
             c.HSA_STATUS_ERROR_INVALID_MEMORY_POOL => unreachable,
-            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with Attribute
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with AgentAttribute
             else => unreachable, // Undocumented error.
         };
     }
@@ -845,7 +878,7 @@ pub const Instance = struct {
             c.HSA_STATUS_SUCCESS => result,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
             c.HSA_STATUS_ERROR_INVALID_EXECUTABLE => unreachable,
-            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with Attribute
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with AgentAttribute
             else => unreachable, // Undocumented error.
         };
     }
@@ -956,7 +989,63 @@ pub const Instance = struct {
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
             c.HSA_STATUS_ERROR_INVALID_AGENT => unreachable,
             c.HSA_STATUS_ERROR_INVALID_MEMORY_POOL => unreachable,
-            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with Attribute
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with AgentAttribute
+            else => unreachable, // Undocumented error.
+        };
+    }
+
+    pub fn setProfilerEnabled(
+        self: *const Instance,
+        queue: *Queue,
+        enable: bool,
+    ) void {
+        return switch (self.amd_profiling_set_profiler_enabled(
+            queue,
+            @boolToInt(enable),
+        )) {
+            c.HSA_STATUS_SUCCESS => {},
+            c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_QUEUE => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable,
+            else => unreachable, // Undocumented error.
+        };
+    }
+
+    pub fn getDispatchTime(
+        self: *const Instance,
+        agent: Agent,
+        signal: Signal,
+    ) ProfilingDispatchTime {
+        var result: ProfilingDispatchTime = undefined;
+        return switch (self.amd_profiling_get_dispatch_time(
+            agent,
+            signal,
+            &result,
+        )) {
+            c.HSA_STATUS_SUCCESS => result,
+            c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_AGENT => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_SIGNAL => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable,
+            else => unreachable, // Undocumented error.
+        };
+    }
+
+    pub fn convertTickToSystemDomain(
+        self: *const Instance,
+        agent: Agent,
+        agent_tick: u64,
+    ) u64 {
+        var result: u64 = undefined;
+        return switch (self.amd_profiling_convert_tick_to_system_domain(
+            agent,
+            agent_tick,
+            &result,
+        )) {
+            c.HSA_STATUS_SUCCESS => result,
+            c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_AGENT => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable,
             else => unreachable, // Undocumented error.
         };
     }
@@ -1028,7 +1117,7 @@ pub const Instance = struct {
             c.HSA_STATUS_SUCCESS => value,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
             c.HSA_STATUS_ERROR_INVALID_EXECUTABLE => unreachable,
-            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with Attribute
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with AgentAttribute
             else => unreachable, // Undocumented error.
         };
     }
@@ -1048,7 +1137,7 @@ pub const Instance = struct {
             c.HSA_STATUS_SUCCESS => result,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
             c.HSA_STATUS_ERROR_INVALID_EXECUTABLE => unreachable,
-            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with Attribute
+            c.HSA_STATUS_ERROR_INVALID_ARGUMENT => unreachable, // Something is wrong with AgentAttribute
             else => unreachable, // Undocumented error.
         };
     }

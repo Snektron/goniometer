@@ -151,7 +151,7 @@ fn apiInfo() sqtt.ApiInfo {
     };
 }
 
-/// Models a full RGP trace.
+/// Models a full RGP trace as produced by Goniometer.
 pub const Capture = struct {
     pub const LoadEvent = struct {
         event_type: sqtt.ObjectLoaderEvents.EventType,

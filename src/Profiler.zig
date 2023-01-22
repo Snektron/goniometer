@@ -384,6 +384,11 @@ pub fn createQueue(
     };
 
     std.debug.assert(try self.queues.fetchPut(self.a, pq, {}) == null);
+
+    // Always enable HSA profiling on the backing queue. Note: ROCR will also set this on the queue, but since
+    // this is implementing a custom queue, that will not enable it here.
+    self.instance.setProfilerEnabled(pq.backing_queue, true);
+
     return &pq.queue;
 }
 
@@ -492,9 +497,29 @@ pub fn dispatchKernel(
         packet.grid_size_y / packet.workgroup_size_y,
         packet.grid_size_z / packet.workgroup_size_z,
     );
+
+    var dispatch_packet align(hsa.Packet.alignment) = packet.*;
+    // Need this signal to be here so that we can get the dispatch time.
+    // Note: It looks like the ROCR-Runtime does not set this field, ever, and instead measures dispatch
+    // time another way.
+    // TODO: Check that, because if they do, measuring this may become really annoying.
+    // TODO: Handle any existing signals in a more graceful/efficient manner anyway.
+    // TODO: Create a separate signal for this instead of stealing this one.
+    const signal = pq.thread_trace.stop_packet.completion_signal;
+    dispatch_packet.completion_signal = signal;
+
     self.submit(pq, update_packet.asHsaPacket());
-    self.submit(pq, @ptrCast(*align(hsa.Packet.alignment) const hsa.Packet, packet));
-    self.signalWaitAndReset(update_packet.completion_signal);
+    self.submit(pq, @ptrCast(*align(hsa.Packet.alignment) const hsa.Packet, &dispatch_packet));
+    self.signalWaitAndReset(signal);
+
+    const agent = self.agents.keys()[pq.agent].agent;
+    const dispatch_time = self.instance.getDispatchTime(agent, signal);
+
+    const freq = self.agents.keys()[pq.agent].properties.timestamp_freq;
+    const time = @intToFloat(f64, dispatch_time.end -% dispatch_time.start) * (1e3 / @intToFloat(f64, freq));
+
+    std.log.debug("kernel dispatch time: {} {}", .{ dispatch_time.start, dispatch_time.end });
+    std.log.debug(".. elapsed: {d} ms", .{time});
 }
 
 /// Track meta-information about an HSA executable. Should be called when
