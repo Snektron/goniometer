@@ -15,7 +15,7 @@ pub fn log(
     args: anytype,
 ) void {
     _ = scope;
-    if (@enumToInt(level) > @enumToInt(log_level))
+    if (@intFromEnum(level) > @intFromEnum(log_level))
         return;
 
     const prefix = comptime level.asText();
@@ -35,7 +35,7 @@ fn queueCreate(
     queue.* = profiler.createQueue(
         agent,
         size,
-        @intToEnum(hsa.QueueType32, queue_type),
+        @enumFromInt(queue_type),
         callback,
         data,
         private_segment_size,
@@ -85,8 +85,8 @@ fn queue_intercept(comptime order: std.builtin.AtomicOrder) type {
                 return;
             };
 
-            const begin = @atomicRmw(u64, &pq.read_index, .Xchg, @intCast(u64, queue_index + 1), .Monotonic);
-            const end = @atomicLoad(u64, &pq.write_index, .Monotonic);
+            const begin = @atomicRmw(u64, &pq.read_index, .Xchg, @intCast(queue_index + 1), .monotonic);
+            const end = @atomicLoad(u64, &pq.write_index, .monotonic);
 
             const packet_buf = pq.packetBuffer();
             var i = begin;
@@ -149,7 +149,7 @@ export fn OnLoad(
     _ = failed_tool_names;
     _ = runtime_version;
 
-    if (std.os.getenv("GONIOMETER_LOG")) |level| {
+    if (std.posix.getenv("GONIOMETER_LOG")) |level| {
         log_level = std.meta.stringToEnum(std.log.Level, level) orelse .info;
     }
 
@@ -165,22 +165,22 @@ export fn OnLoad(
     table.core.queue_destroy = &queueDestroy;
     table.amd_ext.profiling_set_profiler_enabled = &queueSetProfingEnabled;
 
-    table.core.signal_store_relaxed = &queue_intercept(.Monotonic).signalStore;
-    table.core.signal_store_screlease = &queue_intercept(.Release).signalStore;
+    table.core.signal_store_relaxed = &queue_intercept(.monotonic).signalStore;
+    table.core.signal_store_screlease = &queue_intercept(.release).signalStore;
 
-    table.core.queue_load_read_index_relaxed = &queue_intercept(.Monotonic).loadQueueReadIndex;
-    table.core.queue_load_read_index_scacquire = &queue_intercept(.Acquire).loadQueueReadIndex;
+    table.core.queue_load_read_index_relaxed = &queue_intercept(.monotonic).loadQueueReadIndex;
+    table.core.queue_load_read_index_scacquire = &queue_intercept(.acquire).loadQueueReadIndex;
 
-    table.core.queue_load_write_index_relaxed = &queue_intercept(.Monotonic).loadQueueWriteIndex;
-    table.core.queue_load_write_index_scacquire = &queue_intercept(.Acquire).loadQueueWriteIndex;
+    table.core.queue_load_write_index_relaxed = &queue_intercept(.monotonic).loadQueueWriteIndex;
+    table.core.queue_load_write_index_scacquire = &queue_intercept(.acquire).loadQueueWriteIndex;
 
-    table.core.queue_store_write_index_relaxed = &queue_intercept(.Monotonic).storeQueueWriteIndex;
-    table.core.queue_store_write_index_screlease = &queue_intercept(.Release).storeQueueWriteIndex;
+    table.core.queue_store_write_index_relaxed = &queue_intercept(.monotonic).storeQueueWriteIndex;
+    table.core.queue_store_write_index_screlease = &queue_intercept(.release).storeQueueWriteIndex;
 
-    table.core.queue_add_write_index_relaxed = &queue_intercept(.Monotonic).addQueueWriteIndex;
-    table.core.queue_add_write_index_scacq_screl = &queue_intercept(.AcqRel).addQueueWriteIndex;
-    table.core.queue_add_write_index_scacquire = &queue_intercept(.Acquire).addQueueWriteIndex;
-    table.core.queue_add_write_index_screlease = &queue_intercept(.Release).addQueueWriteIndex;
+    table.core.queue_add_write_index_relaxed = &queue_intercept(.monotonic).addQueueWriteIndex;
+    table.core.queue_add_write_index_scacq_screl = &queue_intercept(.acq_rel).addQueueWriteIndex;
+    table.core.queue_add_write_index_scacquire = &queue_intercept(.acquire).addQueueWriteIndex;
+    table.core.queue_add_write_index_screlease = &queue_intercept(.release).addQueueWriteIndex;
 
     table.core.executable_freeze = &executableFreeze;
     table.core.executable_destroy = &executableDestroy;

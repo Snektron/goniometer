@@ -79,7 +79,7 @@ pub fn init(
         cpu_pool,
         threadTraceBufferSize(agent_info.properties.shader_engines, thread_trace_buffer_size),
     );
-    std.mem.set(u8, output_buffer, 0);
+    @memset(output_buffer, 0);
     errdefer instance.memoryPoolFree(output_buffer);
     instance.agentsAllowAccess(output_buffer.ptr, &.{agent_info.agent});
 
@@ -131,7 +131,7 @@ pub fn update(
     wgp_count_z: u32,
 ) *const hsa.Pm4IndirectBufferPacket {
     var cmdbuf = CmdBuf{
-        .cap = @intCast(u32, self.update_commands.len),
+        .cap = @intCast(self.update_commands.len),
         .buf = self.update_commands.ptr,
     };
 
@@ -147,12 +147,13 @@ pub fn update(
             .extra_dwords = 0,
             .data_type = .object_name,
         },
-        .str_len = @intCast(u32, kernel_name.len),
-        .str_data = .{0} ** 1024,
+        .str_len = @intCast(kernel_name.len),
+        .str_data = .{0} ** 4096,
     };
     // TODO: Check size and bound.
-    std.mem.copy(u8, &name_marker.str_data, kernel_name);
-    cmdbuf.sqttDataMarker(@ptrCast([*]const pm4.Word, &name_marker)[0 .. @sizeOf(sqtt.marker.UserEvent) / @sizeOf(pm4.Word) + 1 + (std.math.divCeil(u32, @intCast(u32, kernel_name.len), 4) catch unreachable)]);
+    @memcpy(name_marker.str_data[0..kernel_name.len], kernel_name);
+    const words: [*]const pm4.Word = @ptrCast(&name_marker);
+    cmdbuf.sqttDataMarker(words[0 .. @sizeOf(sqtt.marker.UserEvent) / @sizeOf(pm4.Word) + 1 + (std.math.divCeil(u32, @intCast(kernel_name.len), 4) catch unreachable)]);
 
     cmdbuf.sqttMarker(sqtt.marker.EventWithDims, &.{
         .event = .{
@@ -173,10 +174,10 @@ pub fn update(
 }
 
 fn threadTraceBufferSize(shader_engines: u32, per_trace_buffer_size: u32) u32 {
-    const aligned_buffer_size = std.mem.alignForward(per_trace_buffer_size, sqtt_buffer_align);
-    const size = std.mem.alignForward(@sizeOf(ThreadTraceInfo) * shader_engines, sqtt_buffer_align) +
+    const aligned_buffer_size = std.mem.alignForward(usize, per_trace_buffer_size, sqtt_buffer_align);
+    const size = std.mem.alignForward(usize, @sizeOf(ThreadTraceInfo) * shader_engines, sqtt_buffer_align) +
         aligned_buffer_size * shader_engines;
-    return @intCast(u32, size);
+    return @intCast(size);
 }
 
 fn threadTraceInfoOffset(shader_engine: u32) usize {
@@ -184,8 +185,8 @@ fn threadTraceInfoOffset(shader_engine: u32) usize {
 }
 
 fn threadTraceDataOffset(per_trace_buffer_size: u32, shader_engine: u32, shader_engines: u32) usize {
-    var data_offset = std.mem.alignForward(@sizeOf(ThreadTraceInfo) * shader_engines, sqtt_buffer_align);
-    data_offset += std.mem.alignForward(per_trace_buffer_size, sqtt_buffer_align) * shader_engine;
+    var data_offset = std.mem.alignForward(usize, @sizeOf(ThreadTraceInfo) * shader_engines, sqtt_buffer_align);
+    data_offset += std.mem.alignForward(usize, per_trace_buffer_size, sqtt_buffer_align) * shader_engine;
     return data_offset;
 }
 
@@ -202,7 +203,7 @@ fn startCommands(
     errdefer cmdbuf.free(instance);
 
     const shifted_size = @shrExact(thread_trace_buffer_size, sqtt_buffer_align_shift);
-    const output_va = @ptrToInt(output_buffer.ptr);
+    const output_va = @intFromPtr(output_buffer.ptr);
 
     // wait until the queue is idle
     cmdbuf.cacheFlush(.{
@@ -253,7 +254,7 @@ fn startCommands(
         cmdbuf.setUConfigReg(.grbm_gfx_index, .{
             .instance_index = 0,
             .sa_index = 0,
-            .se_index = @intCast(u8, shader_engine),
+            .se_index = @intCast(shader_engine),
             .sa_broadcast_writes = false,
             .instance_broadcast_writes = true,
             .se_broadcast_writes = false,
@@ -262,15 +263,15 @@ fn startCommands(
         // Assume gfx1030
         // Note: order is apparently important for the following 2 registers.
         cmdbuf.setPrivilegedConfigReg(.sqtt_buf0_size, .{
-            .size = @intCast(u24, shifted_size),
-            .base_hi = @intCast(u8, shifted_va >> 32),
+            .size = @intCast(shifted_size),
+            .base_hi = @intCast(shifted_va >> 32),
         });
-        cmdbuf.setPrivilegedConfigReg(.sqtt_buf0_base, @truncate(u32, shifted_va));
+        cmdbuf.setPrivilegedConfigReg(.sqtt_buf0_base, @truncate(shifted_va));
 
         cmdbuf.setPrivilegedConfigReg(.sqtt_mask, .{
             .wtype_include = 0x7F,
             .sa_sel = 0,
-            .wgp_sel = @intCast(u1, first_active_cu / 2),
+            .wgp_sel = @intCast(first_active_cu / 2),
             .simd_sel = 0,
         });
 
@@ -355,7 +356,7 @@ fn stopCommands(
         cmdbuf.setUConfigReg(.grbm_gfx_index, .{
             .instance_index = 0,
             .sa_index = 0,
-            .se_index = @intCast(u8, shader_engine),
+            .se_index = @intCast(shader_engine),
             .sa_broadcast_writes = false,
             .instance_broadcast_writes = true,
             .se_broadcast_writes = false,
@@ -369,7 +370,7 @@ fn stopCommands(
             .engine = .me,
             .poll_addr = sqtt_status.address(),
             .reference = 0,
-            .mask = @bitCast(u32, sqtt_status.Type(){
+            .mask = @bitCast(sqtt_status.Type(){
                 .finish_done = std.math.maxInt(u12),
             }),
             .poll_interval = 4,
@@ -397,7 +398,7 @@ fn stopCommands(
             .engine = .me,
             .poll_addr = sqtt_status.address(),
             .reference = 0,
-            .mask = @bitCast(u32, sqtt_status.Type(){
+            .mask = @bitCast(sqtt_status.Type(){
                 .busy = true,
             }),
             .poll_interval = 4,
@@ -411,10 +412,10 @@ fn stopCommands(
         };
 
         // Assumes again that the gpu and cpu pointers match.
-        const va = @ptrToInt(output_buffer.ptr);
+        const va = @intFromPtr(output_buffer.ptr);
         const info_va = va + threadTraceInfoOffset(shader_engine);
 
-        for (info_regs) |reg, i| {
+        for (info_regs, 0..) |reg, i| {
             cmdbuf.copyData(.{
                 .control = .{
                     .src_sel = .perf,
@@ -463,7 +464,7 @@ fn stopCommands(
 /// using `deinit(a)`.
 pub fn read(self: *Self, a: Allocator, agent_info: AgentInfo) ![]Trace {
     const shader_engines = agent_info.properties.shader_engines;
-    const output_va = @ptrToInt(self.output_buffer.ptr);
+    const output_va = @intFromPtr(self.output_buffer.ptr);
     var shader_engine: u32 = 0;
     var traces = std.ArrayList(Trace).init(a);
     defer traces.deinit();
@@ -474,8 +475,8 @@ pub fn read(self: *Self, a: Allocator, agent_info: AgentInfo) ![]Trace {
         const first_active_cu = 0;
 
         // Data pointer is mapped to CPU, so we can just copy it directly.
-        const info = @intToPtr(*const ThreadTraceInfo, info_va);
-        const data = @intToPtr([*]const u8, data_va)[0 .. info.cur_offset * 32];
+        const info: *const ThreadTraceInfo = @ptrFromInt(info_va);
+        const data = @as([*]const u8, @ptrFromInt(data_va))[0 .. info.cur_offset * 32];
 
         std.log.debug("se {}: trace used {} out of {} bytes", .{ shader_engine, data.len, thread_trace_buffer_size });
 

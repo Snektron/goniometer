@@ -16,7 +16,7 @@ fn dump(name: []const u8, depth: usize, writer: anytype, val: anytype) !void {
                 }
             }
         },
-        .Enum => try writer.print("{s}: {s} ({}, 0x{x})\n", .{ name, @tagName(val), @enumToInt(val), @enumToInt(val) }),
+        .Enum => try writer.print("{s}: {s} ({}, 0x{x})\n", .{ name, @tagName(val), @intFromEnum(val), @intFromEnum(val) }),
         .Array => |info| switch (info.child) {
             u8 => try writer.print("{s}: {s}\n", .{ name, val }),
             else => try writer.print("{s}: {any}\n", .{ name, val }),
@@ -28,7 +28,7 @@ fn dump(name: []const u8, depth: usize, writer: anytype, val: anytype) !void {
 }
 
 fn dumpCodeObjectDb(out: anytype, name: []const u8, data: []align(0x1000) const u8) !void {
-    const db = @ptrCast(*const sqtt.CodeObjectDatabase, data.ptr).*;
+    const db = @as(*const sqtt.CodeObjectDatabase, @ptrCast(data.ptr)).*;
     try dump(name, 0, out, db);
 
     // Note: actually this is db.offset + @sizeOf(sqtt.CodeObjectDatabase),
@@ -36,7 +36,7 @@ fn dumpCodeObjectDb(out: anytype, name: []const u8, data: []align(0x1000) const 
     var offset: usize = @sizeOf(sqtt.CodeObjectDatabase);
     var i: usize = 0;
     while (i < db.record_count) : (i += 1) {
-        const record = @ptrCast(*const sqtt.CodeObjectDatabase.Record, @alignCast(4, &data[offset]));
+        const record: *const sqtt.CodeObjectDatabase.Record = @ptrCast(@alignCast(&data[offset]));
         offset += @sizeOf(sqtt.CodeObjectDatabase.Record);
         // const binary = data[offset..][0..record.record_size];
         offset += record.record_size;
@@ -52,14 +52,14 @@ fn dumpCodeObjectDb(out: anytype, name: []const u8, data: []align(0x1000) const 
 }
 
 fn dumpPsoCorrelation(out: anytype, name: []const u8, data: []align(0x1000) const u8) !void {
-    const pso = @ptrCast(*const sqtt.PsoCorrelation, data.ptr).*;
+    const pso = @as(*const sqtt.PsoCorrelation, @ptrCast(data.ptr)).*;
     try dump(name, 0, out, pso);
 
     // In practise the offset is always behind the struct.
     var offset: usize = @sizeOf(sqtt.PsoCorrelation);
     var i: usize = 0;
     while (i < pso.record_count) : (i += 1) {
-        const record = @ptrCast(*const sqtt.PsoCorrelation.Record, @alignCast(8, &data[offset]));
+        const record: *const sqtt.PsoCorrelation.Record = @ptrCast(@alignCast(&data[offset]));
         offset += pso.record_size;
         try out.print("  record {}:\n", .{i});
         try dump("record", 2, out, record.*);
@@ -71,11 +71,11 @@ pub fn main() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var args = try std.process.argsAlloc(allocator);
+    const args = try std.process.argsAlloc(allocator);
 
     if (args.len != 2) {
         std.log.err("usage: {s} <file.rgp>", .{args[0]});
-        std.os.exit(1);
+        std.posix.exit(1);
     }
 
     const file = try std.fs.cwd().openFile(args[1], .{});
@@ -93,24 +93,24 @@ pub fn main() !void {
     var buf = std.ArrayListAligned(u8, 0x1000).init(allocator);
 
     var i: usize = 0;
-    var offset = @intCast(usize, header.chunk_offset);
+    var offset: usize = @intCast(header.chunk_offset);
     while (true) : (i += 1) {
         const chunk_header = in.readStruct(sqtt.ChunkHeader) catch |err| switch (err) {
             error.EndOfStream => break,
             else => |e| return e,
         };
         try buf.resize(chunk_header.size_bytes);
-        std.mem.copy(u8, buf.items, std.mem.asBytes(&chunk_header));
+        @memcpy(buf.items[0..@sizeOf(sqtt.ChunkHeader)], std.mem.asBytes(&chunk_header));
         try in.readNoEof(buf.items[@sizeOf(sqtt.ChunkHeader)..]);
 
         const name = try std.fmt.allocPrint(allocator, "chunk {} at 0x{x}", .{ i, offset });
         offset += chunk_header.size_bytes;
         switch (chunk_header.chunk_id.chunk_type) {
-            .cpu_info => try dump(name, 0, out, @ptrCast(*const sqtt.CpuInfo, buf.items.ptr).*),
-            .asic_info => try dump(name, 0, out, @ptrCast(*const sqtt.AsicInfo, buf.items.ptr).*),
-            .api_info => try dump(name, 0, out, @ptrCast(*const sqtt.ApiInfo, buf.items.ptr).*),
-            .sqtt_desc => try dump(name, 0, out, @ptrCast(*const sqtt.SqttDesc, buf.items.ptr).*),
-            .sqtt_data => try dump(name, 0, out, @ptrCast(*const sqtt.SqttData, buf.items.ptr).*),
+            .cpu_info => try dump(name, 0, out, @as(*const sqtt.CpuInfo, @ptrCast(buf.items.ptr)).*),
+            .asic_info => try dump(name, 0, out, @as(*const sqtt.AsicInfo, @ptrCast(buf.items.ptr)).*),
+            .api_info => try dump(name, 0, out, @as(*const sqtt.ApiInfo, @ptrCast(buf.items.ptr)).*),
+            .sqtt_desc => try dump(name, 0, out, @as(*const sqtt.SqttDesc, @ptrCast(buf.items.ptr)).*),
+            .sqtt_data => try dump(name, 0, out, @as(*const sqtt.SqttData, @ptrCast(buf.items.ptr)).*),
             .code_object_database => try dumpCodeObjectDb(out, name, buf.items),
             .pso_correlation => try dumpPsoCorrelation(out, name, buf.items),
             else => {

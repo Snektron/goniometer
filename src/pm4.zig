@@ -28,7 +28,7 @@ pub const ShRegister = enum(u16) {
     compute_thread_trace_enable = 0xB878,
 
     pub fn address(self: ShRegister) u16 {
-        return (@enumToInt(self) - base) / @sizeOf(u32);
+        return (@intFromEnum(self) - base) / @sizeOf(u32);
     }
 
     pub fn Type(comptime self: ShRegister) type {
@@ -52,7 +52,7 @@ pub const UConfigRegister = enum(u32) {
     rlc_perfmon_clock_cntl = 0x37390,
 
     pub fn address(self: UConfigRegister) u32 {
-        return (@enumToInt(self) - base) / @sizeOf(u32);
+        return (@intFromEnum(self) - base) / @sizeOf(u32);
     }
 
     pub fn Type(comptime self: UConfigRegister) type {
@@ -118,7 +118,7 @@ pub const PrivilegedRegister = enum(u16) {
     sqtt_dropped_cntr = 0x8D24,
 
     pub fn address(self: PrivilegedRegister) u32 {
-        return @enumToInt(self) / @sizeOf(u32);
+        return @intFromEnum(self) / @sizeOf(u32);
     }
 
     pub fn Type(comptime self: PrivilegedRegister) type {

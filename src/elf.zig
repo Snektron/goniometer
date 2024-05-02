@@ -19,7 +19,7 @@ pub fn getSectionVirtualAddr(bin: Binary, section: []const u8) !usize {
         return error.InvalidElf;
     const header = elf.Header.parse(bin[0..@sizeOf(elf.Ehdr)]) catch return error.InvalidElf;
 
-    if (!header.is_64 or header.endian != .Little) {
+    if (!header.is_64 or header.endian != .little) {
         std.log.err("unexpected machine elf format for code object", .{});
         return error.InvalidElf;
     }
@@ -42,7 +42,7 @@ pub fn getGpuFunctions(a: Allocator, bin: Binary) !std.StringArrayHashMapUnmanag
         return error.InvalidElf;
     const header = elf.Header.parse(bin[0..@sizeOf(elf.Ehdr)]) catch return error.InvalidElf;
 
-    if (!header.is_64 or header.endian != .Little) {
+    if (!header.is_64 or header.endian != .little) {
         std.log.err("unexpected machine elf format for code object", .{});
         return error.InvalidElf;
     }
@@ -80,7 +80,7 @@ pub fn getGpuFunctions(a: Allocator, bin: Binary) !std.StringArrayHashMapUnmanag
         // section if everything is right, so we can subtract its virtual address to get the offset into the
         // text section
         const offset = sym.st_value - text_shdr.sh_addr;
-        const code = @alignCast(@alignOf(pm4.Word), std.mem.bytesAsSlice(pm4.Word, text[offset..][0..sym.st_size]));
+        const code: []const pm4.Word = @alignCast(std.mem.bytesAsSlice(pm4.Word, text[offset..][0..sym.st_size]));
         try functions.put(a, try a.dupe(u8, name), try a.dupe(pm4.Word, code));
 
         // std.log.debug("found symbol: {s} {} {} {} {x}", .{name, sym.st_info & 0xF, offset, sym.st_size, code[code.len - 1]});

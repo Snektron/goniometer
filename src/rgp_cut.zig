@@ -14,7 +14,7 @@ pub fn main() !void {
 
     if (args.len < 4) {
         std.log.err("usage: {s} <in.rgp> <out.rgp> <chunk selectors...>", .{args[0]});
-        std.os.exit(1);
+        std.posix.exit(1);
     }
 
     var chunks_to_keep = std.ArrayList(bool).init(allocator);

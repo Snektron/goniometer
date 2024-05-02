@@ -349,7 +349,7 @@ pub const Packet = extern struct {
 
     pub fn cast(self: *align(alignment) Packet, comptime ty: Type) ?*align(alignment) ty.PacketType() {
         if (self.header.packet_type == ty) {
-            return @ptrCast(*ty.PacketType(), self);
+            return @ptrCast(self);
         }
         return null;
     }
@@ -411,16 +411,14 @@ pub const Pm4IndirectBufferPacket = extern struct {
     }
 
     pub fn asHsaPacket(self: *const Pm4IndirectBufferPacket) *const Packet {
-        return @ptrCast(*const Packet, self);
+        return @ptrCast(self);
     }
 };
 
 /// Get the packet buffer for an HSA queue.
 pub fn queuePacketBuffer(queue: *Queue) []align(Packet.alignment) Packet {
-    return @ptrCast(
-        [*]align(Packet.alignment) Packet,
-        @alignCast(Packet.alignment, queue.base_address.?),
-    )[0..queue.size];
+    const packets: [*]align(Packet.alignment) Packet = @ptrCast(@alignCast(queue.base_address.?));
+    return packets[0..queue.size];
 }
 
 /// This struct represents a handle to HSA. This struct holds the function pointers that
@@ -528,15 +526,15 @@ pub const Instance = struct {
         queue: *Queue,
         packet: *const Packet,
     ) void {
-        const write_index = self.queueAddWriteIndex(queue, 1, .AcqRel);
+        const write_index = self.queueAddWriteIndex(queue, 1, .acq_rel);
 
         // Busy loop until there is space.
         // TODO: Maybe this can be improved or something?
-        while (write_index - self.queueLoadReadIndex(queue, .Monotonic) >= queue.size) {
+        while (write_index - self.queueLoadReadIndex(queue, .monotonic) >= queue.size) {
             continue;
         }
 
-        const slot_index = @intCast(u32, write_index % queue.size);
+        const slot_index: u32 = @intCast(write_index % queue.size);
         const slot = &queuePacketBuffer(queue)[slot_index];
 
         // AQL packets have an 'invalid' header, which indicates that there is no packet at this
@@ -544,12 +542,12 @@ pub const Instance = struct {
         // it is completely written.
         const packet_bytes = std.mem.asBytes(packet);
         const slot_bytes = std.mem.asBytes(slot);
-        std.mem.copy(u8, slot_bytes[2..], packet_bytes[2..]);
+        @memcpy(slot_bytes[2..], packet_bytes[2..]);
         // Write the packet header atomically.
-        @atomicStore(u16, @ptrCast(*u16, &slot.header), @bitCast(u16, packet.header), .Release);
+        @atomicStore(u16, @as(*u16, @ptrCast(&slot.header)), @bitCast(packet.header), .release);
 
         // Finally, ring the doorbell to notify the agent of the updated packet.
-        self.signalStore(queue.doorbell_signal, @intCast(SignalValue, write_index), .Monotonic);
+        self.signalStore(queue.doorbell_signal, @intCast(write_index), .monotonic);
     }
 
     // Wrapped API functionality //
@@ -560,8 +558,8 @@ pub const Instance = struct {
     ) attribute.Type() {
         var value: attribute.Type() = undefined;
         return switch (self.system_get_info(
-            @enumToInt(attribute),
-            @ptrCast(*anyopaque, &value),
+            @intFromEnum(attribute),
+            @ptrCast(&value),
         )) {
             c.HSA_STATUS_SUCCESS => value,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
@@ -578,8 +576,8 @@ pub const Instance = struct {
         var value: attribute.Type() = undefined;
         return switch (self.agent_get_info(
             agent,
-            @enumToInt(attribute),
-            @ptrCast(*anyopaque, &value),
+            @intFromEnum(attribute),
+            @ptrCast(&value),
         )) {
             c.HSA_STATUS_SUCCESS => value,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
@@ -607,7 +605,7 @@ pub const Instance = struct {
             result: Result,
 
             fn cbk(agent: Agent, data: ?*anyopaque) callconv(.C) Status {
-                const s = @ptrCast(*@This(), @alignCast(@alignOf(@This()), data.?));
+                const s: *@This() = @ptrCast(@alignCast(data.?));
                 s.result = callback(s.context, agent);
                 const result = s.result catch return c.HSA_STATUS_ERROR;
                 if (result != null) {
@@ -638,8 +636,8 @@ pub const Instance = struct {
         return switch (self.queue_create(
             agent,
             size,
-            @enumToInt(queue_type),
-            @ptrCast(?*const fn (Status, [*c]Queue, data: ?*anyopaque) callconv(.C) void, callback),
+            @intFromEnum(queue_type),
+            @ptrCast(callback),
             data,
             private_segment_size,
             group_segment_size,
@@ -672,9 +670,9 @@ pub const Instance = struct {
         queue: *const Queue,
         comptime ordering: AtomicOrder,
     ) u64 {
-        const func = comptime switch (ordering) {
-            .Monotonic => self.queue_load_read_index_relaxed,
-            .Acquire => self.queue_load_read_index_scacquire,
+        const func = switch (ordering) {
+            .monotonic => self.queue_load_read_index_relaxed,
+            .acquire => self.queue_load_read_index_scacquire,
             else => unreachable, // Invalid memory ordering.
         };
         return func(queue);
@@ -685,9 +683,9 @@ pub const Instance = struct {
         queue: *const Queue,
         comptime ordering: AtomicOrder,
     ) u64 {
-        const func = comptime switch (ordering) {
-            .Monotonic => self.queue_load_write_index_relaxed,
-            .Acquire => self.queue_load_write_index_scacquire,
+        const func = switch (ordering) {
+            .monotonic => self.queue_load_write_index_relaxed,
+            .acquire => self.queue_load_write_index_scacquire,
             else => unreachable, // Invalid memory ordering.
         };
         return func(queue);
@@ -699,9 +697,9 @@ pub const Instance = struct {
         value: u64,
         comptime ordering: AtomicOrder,
     ) void {
-        const func = comptime switch (ordering) {
-            .Monotonic => self.queue_store_write_index_relaxed,
-            .Release => self.queue_store_write_index_screlease,
+        const func = switch (ordering) {
+            .monotonic => self.queue_store_write_index_relaxed,
+            .release => self.queue_store_write_index_screlease,
             else => unreachable, // Invalid memory ordering.
         };
         func(queue, value);
@@ -713,11 +711,11 @@ pub const Instance = struct {
         value: u64,
         comptime ordering: AtomicOrder,
     ) u64 {
-        const func = comptime switch (ordering) {
-            .Monotonic => self.queue_add_write_index_relaxed,
-            .AcqRel => self.queue_add_write_index_scacq_screl,
-            .Acquire => self.queue_add_write_index_scacquire,
-            .Release => self.queue_add_write_index_screlease,
+        const func = switch (ordering) {
+            .monotonic => self.queue_add_write_index_relaxed,
+            .acq_rel => self.queue_add_write_index_scacq_screl,
+            .acquire => self.queue_add_write_index_scacquire,
+            .release => self.queue_add_write_index_screlease,
             else => unreachable, // Invalid memory ordering.
         };
         return func(queue, value);
@@ -731,7 +729,7 @@ pub const Instance = struct {
         var signal: Signal = undefined;
         return switch (self.signal_create(
             initial_value,
-            @intCast(u32, consumers.len),
+            @intCast(consumers.len),
             if (consumers.len == 0) null else consumers.ptr,
             &signal,
         )) {
@@ -759,9 +757,9 @@ pub const Instance = struct {
         value: SignalValue,
         comptime ordering: AtomicOrder,
     ) void {
-        const func = comptime switch (ordering) {
-            .Monotonic => self.signal_store_relaxed,
-            .Release => self.signal_store_screlease,
+        const func = switch (ordering) {
+            .monotonic => self.signal_store_relaxed,
+            .release => self.signal_store_screlease,
             else => unreachable, // Invalid memory ordering.
         };
         func(signal, value);
@@ -776,12 +774,12 @@ pub const Instance = struct {
         wait_state_hint: WaitState,
         comptime ordering: AtomicOrder,
     ) SignalValue {
-        const func = comptime switch (ordering) {
-            .Monotonic => unreachable, // TODO: add
-            .Acquire => self.signal_wait_scacquire,
+        const func = switch (ordering) {
+            .monotonic => unreachable, // TODO: add
+            .acquire => self.signal_wait_scacquire,
             else => unreachable, // Invalid memory ordering.
         };
-        return func(signal, @enumToInt(condition), compare_value, timeout_hint, @enumToInt(wait_state_hint));
+        return func(signal, @intFromEnum(condition), compare_value, timeout_hint, @intFromEnum(wait_state_hint));
     }
 
     fn freezeExecutable(self: *const Instance, exe: Executable, options: [*:0]const u8) !void {
@@ -826,7 +824,7 @@ pub const Instance = struct {
             result: Result,
 
             fn cbk(exe_: Executable, sym: Symbol, data: ?*anyopaque) callconv(.C) Status {
-                const s = @ptrCast(*@This(), @alignCast(@alignOf(@This()), data.?));
+                const s: *@This() = @ptrCast(@alignCast(data.?));
                 s.result = callback(s.context, exe_, sym);
                 const result = s.result catch return c.HSA_STATUS_ERROR;
                 if (result != null) {
@@ -851,8 +849,8 @@ pub const Instance = struct {
         var value: attribute.Type() = undefined;
         return switch (self.executable_symbol_get_info(
             sym,
-            @enumToInt(attribute),
-            @ptrCast(*anyopaque, &value),
+            @intFromEnum(attribute),
+            @ptrCast(&value),
         )) {
             c.HSA_STATUS_SUCCESS => value,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
@@ -872,7 +870,7 @@ pub const Instance = struct {
         const result = try allocator.alloc(u8, len);
         return switch (self.executable_symbol_get_info(
             sym,
-            @enumToInt(SymbolAttribute.name),
+            @intFromEnum(SymbolAttribute.name),
             result.ptr,
         )) {
             c.HSA_STATUS_SUCCESS => result,
@@ -902,7 +900,7 @@ pub const Instance = struct {
             result: Result,
 
             fn cbk(pool: MemoryPool, data: ?*anyopaque) callconv(.C) Status {
-                const s = @ptrCast(*@This(), @alignCast(@alignOf(@This()), data.?));
+                const s: *@This() = @ptrCast(@alignCast(data.?));
                 s.result = callback(s.context, pool);
                 const result = s.result catch return c.HSA_STATUS_ERROR;
                 if (result != null) {
@@ -925,7 +923,7 @@ pub const Instance = struct {
         agents: []const Agent,
     ) void {
         return switch (self.amd_agents_allow_access(
-            @intCast(u32, agents.len),
+            @intCast(agents.len),
             agents.ptr,
             null,
             ptr,
@@ -948,7 +946,7 @@ pub const Instance = struct {
             pool,
             size * @sizeOf(T),
             0,
-            @ptrCast(*?*anyopaque, &ptr),
+            @ptrCast(&ptr),
         )) {
             c.HSA_STATUS_SUCCESS => ptr[0..size],
             c.HSA_STATUS_ERROR_OUT_OF_RESOURCES => error.OutOfResources,
@@ -982,8 +980,8 @@ pub const Instance = struct {
         var value: attribute.Type() = undefined;
         return switch (self.amd_memory_pool_get_info(
             pool,
-            @enumToInt(attribute),
-            @ptrCast(*anyopaque, &value),
+            @intFromEnum(attribute),
+            @ptrCast(&value),
         )) {
             c.HSA_STATUS_SUCCESS => value,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
@@ -1001,7 +999,7 @@ pub const Instance = struct {
     ) void {
         return switch (self.amd_profiling_set_profiler_enabled(
             queue,
-            @boolToInt(enable),
+            @intFromBool(enable),
         )) {
             c.HSA_STATUS_SUCCESS => {},
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
@@ -1058,7 +1056,7 @@ pub const Instance = struct {
         var host_addr: *const T = undefined;
         return switch (self.amd_loader_query_host_address(
             device_addr,
-            @ptrCast(*?*const anyopaque, &host_addr),
+            @ptrCast(&host_addr),
         )) {
             c.HSA_STATUS_SUCCESS => host_addr,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
@@ -1086,7 +1084,7 @@ pub const Instance = struct {
             result: Result,
 
             fn cbk(exe_: Executable, code_object: LoadedCodeObject, data: ?*anyopaque) callconv(.C) Status {
-                const s = @ptrCast(*@This(), @alignCast(@alignOf(@This()), data.?));
+                const s: *@This() = @ptrCast(@alignCast(data.?));
                 s.result = callback(s.context, exe_, code_object);
                 const result = s.result catch return c.HSA_STATUS_ERROR;
                 if (result != null) {
@@ -1111,8 +1109,8 @@ pub const Instance = struct {
         var value: attribute.Type() = undefined;
         return switch (self.amd_loader_loaded_code_object_get_info(
             co,
-            @enumToInt(attribute),
-            @ptrCast(*anyopaque, &value),
+            @intFromEnum(attribute),
+            @ptrCast(&value),
         )) {
             c.HSA_STATUS_SUCCESS => value,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
@@ -1131,8 +1129,8 @@ pub const Instance = struct {
         const result = try allocator.alloc(u8, len);
         return switch (self.amd_loader_loaded_code_object_get_info(
             co,
-            @enumToInt(LoadedCodeObjectAttribute.uri),
-            @ptrCast(*anyopaque, result.ptr),
+            @intFromEnum(LoadedCodeObjectAttribute.uri),
+            @ptrCast(result.ptr),
         )) {
             c.HSA_STATUS_SUCCESS => result,
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
@@ -1413,6 +1411,8 @@ pub const AmdExtTable = extern struct {
     memory_pool_allocate: *const @TypeOf(c.hsa_amd_memory_pool_allocate),
     memory_pool_free: *const @TypeOf(c.hsa_amd_memory_pool_free),
     memory_async_copy: *const @TypeOf(c.hsa_amd_memory_async_copy),
+    memory_async_copy_on_engine: *const @TypeOf(c.hsa_amd_memory_async_copy_on_engine),
+    memory_copy_engine_status: *const @TypeOf(c.hsa_amd_memory_copy_engine_status),
     agent_memory_pool_get_info: *const @TypeOf(c.hsa_amd_agent_memory_pool_get_info),
     agents_allow_access: *const @TypeOf(c.hsa_amd_agents_allow_access),
     memory_pool_can_migrate: *const @TypeOf(c.hsa_amd_memory_pool_can_migrate),
@@ -1444,7 +1444,24 @@ pub const AmdExtTable = extern struct {
     svm_attributes_set: *const @TypeOf(c.hsa_amd_svm_attributes_set),
     svm_attributes_get: *const @TypeOf(c.hsa_amd_svm_attributes_get),
     svm_prefetch_async: *const @TypeOf(c.hsa_amd_svm_prefetch_async),
+    spm_acquire: *const @TypeOf(c.hsa_amd_spm_acquire),
+    spm_release: *const @TypeOf(c.hsa_amd_spm_release),
+    spm_set_dest_buffer: *const @TypeOf(c.hsa_amd_spm_set_dest_buffer),
     queue_cu_get_mask: *const @TypeOf(c.hsa_amd_queue_cu_get_mask),
+    portable_export_dmabuf: *const @TypeOf(c.hsa_amd_portable_export_dmabuf),
+    portable_close_dmabuf: *const @TypeOf(c.hsa_amd_portable_close_dmabuf),
+    vmem_address_reserve: *const @TypeOf(c.hsa_amd_vmem_address_reserve),
+    vmem_address_free: *const @TypeOf(c.hsa_amd_vmem_address_free),
+    vmem_handle_create: *const @TypeOf(c.hsa_amd_vmem_handle_create),
+    vmem_handle_release: *const @TypeOf(c.hsa_amd_vmem_handle_release),
+    vmem_map: *const @TypeOf(c.hsa_amd_vmem_map),
+    vmem_unmap: *const @TypeOf(c.hsa_amd_vmem_unmap),
+    vmem_set_access: *const @TypeOf(c.hsa_amd_vmem_set_access),
+    vmem_get_access: *const @TypeOf(c.hsa_amd_vmem_get_access),
+    vmem_export_shareable_handle: *const @TypeOf(c.hsa_amd_vmem_export_shareable_handle),
+    vmem_import_shareable_handle: *const @TypeOf(c.hsa_amd_vmem_import_shareable_handle),
+    vmem_retain_alloc_handle: *const @TypeOf(c.hsa_amd_vmem_retain_alloc_handle),
+    vmem_get_alloc_properties_from_handle: *const @TypeOf(c.hsa_amd_vmem_get_alloc_properties_from_handle),
 };
 
 // To add as needed

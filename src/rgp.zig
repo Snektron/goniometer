@@ -122,7 +122,7 @@ fn asicInfo(agent: AgentInfo) sqtt.AsicInfo {
         .gpu_name = props.name ++ [_]u8{0} ** 192,
         .alu_per_clock = 0,
         .texture_per_clock = 0,
-        .prims_per_clock = @intToFloat(f32, props.shader_engines) * 2,
+        .prims_per_clock = @as(f32, @floatFromInt(props.shader_engines)) * 2,
         .pixels_per_clock = 0,
         .gpu_timestamp_frequency = props.timestamp_freq,
         .max_shader_core_clock = clock_freq,
@@ -184,21 +184,21 @@ pub const Capture = struct {
             const co_alignment = 4; // Apparently code objects must be aligned by 4 bytes.
             var size: usize = @sizeOf(sqtt.CodeObjectDatabase);
             for (code_objects) |co| {
-                const aligned_size = std.mem.alignForward(co.elf_binary.len, co_alignment);
+                const aligned_size = std.mem.alignForward(usize, co.elf_binary.len, co_alignment);
                 size += @sizeOf(sqtt.CodeObjectDatabase.Record) + aligned_size;
             }
             try writer.writeStruct(sqtt.CodeObjectDatabase{
-                .header = chunkHeader(.code_object_database, @intCast(u32, size), 0, 0),
-                .offset = @intCast(u32, cw.bytes_written),
+                .header = chunkHeader(.code_object_database, @intCast(size), 0, 0),
+                .offset = @intCast(cw.bytes_written),
                 .flags = 0,
-                .size = @intCast(u32, size),
-                .record_count = @intCast(u32, code_objects.len),
+                .size = @intCast(size),
+                .record_count = @intCast(code_objects.len),
             });
 
             for (code_objects) |co| {
-                const aligned_size = std.mem.alignForward(co.elf_binary.len, co_alignment);
+                const aligned_size = std.mem.alignForward(usize, co.elf_binary.len, co_alignment);
                 try writer.writeStruct(sqtt.CodeObjectDatabase.Record{
-                    .record_size = @intCast(u32, aligned_size),
+                    .record_size = @intCast(aligned_size),
                 });
                 try writer.writeAll(co.elf_binary);
                 // Add the misaligned bytes.
@@ -210,11 +210,11 @@ pub const Capture = struct {
             const load_events = self.load_events[1..2];
             const size = @sizeOf(sqtt.ObjectLoaderEvents) + @sizeOf(sqtt.ObjectLoaderEvents.Record) * load_events.len;
             try writer.writeStruct(sqtt.ObjectLoaderEvents{
-                .header = chunkHeader(.code_object_loader_events, @intCast(u32, size), 1, 1),
-                .offset = @intCast(u32, cw.bytes_written),
+                .header = chunkHeader(.code_object_loader_events, @intCast(size), 1, 1),
+                .offset = @intCast(cw.bytes_written),
                 .flags = 0,
                 .record_size = @sizeOf(sqtt.ObjectLoaderEvents.Record),
-                .record_count = @intCast(u32, load_events.len),
+                .record_count = @intCast(load_events.len),
             });
 
             for (load_events) |event| {
@@ -232,11 +232,11 @@ pub const Capture = struct {
             const load_events = self.load_events[1..2];
             const size = @sizeOf(sqtt.PsoCorrelation) + @sizeOf(sqtt.PsoCorrelation.Record) * load_events.len;
             try writer.writeStruct(sqtt.PsoCorrelation{
-                .header = chunkHeader(.pso_correlation, @intCast(u32, size), 0, 0),
-                .offset = @intCast(u32, cw.bytes_written),
+                .header = chunkHeader(.pso_correlation, @intCast(size), 0, 0),
+                .offset = @intCast(cw.bytes_written),
                 .flags = 0,
                 .record_size = @sizeOf(sqtt.PsoCorrelation.Record),
-                .record_count = @intCast(u32, load_events.len),
+                .record_count = @intCast(load_events.len),
             });
 
             for (load_events) |event| {
@@ -248,12 +248,12 @@ pub const Capture = struct {
             }
         }
 
-        for (self.traces) |trace, i| {
+        for (self.traces, 0..) |trace, i| {
             try writer.writeStruct(sqtt.SqttDesc{
                 .header = .{
                     .chunk_id = .{
                         .chunk_type = .sqtt_desc,
-                        .index = @intCast(u8, i),
+                        .index = @intCast(i),
                     },
                     .ver_minor = 2,
                     .ver_major = 0,
@@ -271,14 +271,14 @@ pub const Capture = struct {
                 .header = .{
                     .chunk_id = .{
                         .chunk_type = .sqtt_data,
-                        .index = @intCast(u8, i),
+                        .index = @intCast(i),
                     },
                     .ver_minor = 0,
                     .ver_major = 0,
-                    .size_bytes = @intCast(u32, @sizeOf(sqtt.SqttData) + trace.data.len),
+                    .size_bytes = @intCast(@sizeOf(sqtt.SqttData) + trace.data.len),
                 },
-                .offset = @intCast(i32, @sizeOf(sqtt.SqttData) + cw.bytes_written),
-                .size = @intCast(u32, trace.data.len),
+                .offset = @intCast(@sizeOf(sqtt.SqttData) + cw.bytes_written),
+                .size = @intCast(trace.data.len),
             });
 
             try writer.writeAll(trace.data);

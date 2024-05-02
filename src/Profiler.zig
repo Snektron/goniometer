@@ -32,7 +32,7 @@ pub const ProfileQueue = struct {
     pub const HashContext = struct {
         pub fn hash(self: @This(), pq: *ProfileQueue) u32 {
             _ = self;
-            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&pq.queue.doorbell_signal.handle)));
+            return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&pq.queue.doorbell_signal.handle)));
         }
 
         pub fn eql(self: @This(), a: *ProfileQueue, b: *ProfileQueue, b_index: usize) bool {
@@ -45,7 +45,7 @@ pub const ProfileQueue = struct {
     pub const HashContextByDoorbell = struct {
         pub fn hash(self: @This(), doorbell: hsa.Signal) u32 {
             _ = self;
-            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&doorbell.handle)));
+            return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&doorbell.handle)));
         }
 
         pub fn eql(self: @This(), doorbell: hsa.Signal, pq: *ProfileQueue, b_index: usize) bool {
@@ -70,11 +70,11 @@ pub const AgentInfo = struct {
         _,
 
         pub fn major(self: GcnArch) u32 {
-            return @enumToInt(self) >> 8;
+            return @intFromEnum(self) >> 8;
         }
 
         pub fn minor(self: GcnArch) u32 {
-            return (@enumToInt(self) >> 4) & 0xF;
+            return (@intFromEnum(self) >> 4) & 0xF;
         }
     };
 
@@ -116,7 +116,7 @@ pub const AgentInfo = struct {
     pub const HashContext = struct {
         pub fn hash(self: @This(), agent_info: AgentInfo) u32 {
             _ = self;
-            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&agent_info.agent.handle)));
+            return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&agent_info.agent.handle)));
         }
 
         pub fn eql(self: @This(), a: AgentInfo, b: AgentInfo, b_index: usize) bool {
@@ -129,7 +129,7 @@ pub const AgentInfo = struct {
     pub const HashContextByAgent = struct {
         pub fn hash(self: @This(), agent: hsa.Agent) u32 {
             _ = self;
-            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&agent.handle)));
+            return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&agent.handle)));
         }
 
         pub fn eql(self: @This(), agent: hsa.Agent, agent_info: AgentInfo, b_index: usize) bool {
@@ -234,12 +234,12 @@ fn queryAgents(self: *Profiler) !void {
         for (self.sessions.items[prev_len..]) |*session| session.* = .{};
     }
 
-    self.cpu_agent = for (self.agents.keys()) |info, i| {
+    self.cpu_agent = for (self.agents.keys(), 0..) |info, i| {
         if (info.properties.agent_type == .cpu)
-            break @intCast(u32, i);
+            break @intCast(i);
     } else {
         std.log.err("system has no cpu agent", .{});
-        return error.Genric;
+        return error.Generic;
     };
 }
 
@@ -278,12 +278,12 @@ fn queryAgentsCbk(self: *Profiler, agent: hsa.Agent) !?void {
     std.log.info("found device '{s}' of type {s}", .{ name, type_str });
 
     if (info.properties.agent_type == .gpu) {
-        const gcn_arch = if (std.mem.startsWith(u8, name, "gfx")) blk: {
+        const gcn_arch: AgentInfo.GcnArch = if (std.mem.startsWith(u8, name, "gfx")) blk: {
             // Try to parse the remainder as gfx architecture level. These are in the form
             // `gfxX` where X are 3 or 4 hexadecimal chars. We're just going to cheat and
             // interpret the rest of the string as hex.
             if (std.fmt.parseInt(u32, name[3..], 16)) |arch_level| {
-                break :blk @intToEnum(AgentInfo.GcnArch, arch_level);
+                break :blk @enumFromInt(arch_level);
             } else |_| {
                 std.log.err("could not parse gfx-like device name '{s}' as gcn arch level", .{name});
                 break :blk .invalid;
@@ -428,7 +428,7 @@ pub fn signalWaitAndReset(self: *Profiler, signal: hsa.Signal) void {
             1,
             stop_trace_signal_timeout_ns,
             .blocked,
-            .Acquire,
+            .acquire,
         );
         switch (value) {
             0 => break,
@@ -436,7 +436,7 @@ pub fn signalWaitAndReset(self: *Profiler, signal: hsa.Signal) void {
             else => unreachable, // Not a binary signal.
         }
     }
-    self.instance.signalStore(signal, 1, .Monotonic);
+    self.instance.signalStore(signal, 1, .monotonic);
 }
 
 /// Start tracing.
@@ -509,14 +509,14 @@ pub fn dispatchKernel(
     dispatch_packet.completion_signal = signal;
 
     self.submit(pq, update_packet.asHsaPacket());
-    self.submit(pq, @ptrCast(*align(hsa.Packet.alignment) const hsa.Packet, &dispatch_packet));
+    self.submit(pq, @ptrCast(&dispatch_packet));
     self.signalWaitAndReset(signal);
 
     const agent = self.agents.keys()[pq.agent].agent;
     const dispatch_time = self.instance.getDispatchTime(agent, signal);
 
     const freq = self.agents.keys()[pq.agent].properties.timestamp_freq;
-    const time = @intToFloat(f64, dispatch_time.end -% dispatch_time.start) * (1e3 / @intToFloat(f64, freq));
+    const time = @as(f64, @floatFromInt(dispatch_time.end -% dispatch_time.start)) * (1e3 / @as(f64, @floatFromInt(freq)));
 
     std.log.debug("kernel dispatch time: {} {}", .{ dispatch_time.start, dispatch_time.end });
     std.log.debug(".. elapsed: {d} ms", .{time});
@@ -539,7 +539,7 @@ pub fn registerExecutable(self: *Profiler, exe: hsa.Executable) !void {
             const ptr = self.instance.getLoadedCodeObjectInfo(code_object, .memory_base);
             const len = self.instance.getLoadedCodeObjectInfo(code_object, .memory_size);
             const binary = try self.a.alignedAlloc(u8, elf.alignment, len);
-            std.mem.copy(u8, binary, ptr[0..len]);
+            @memcpy(binary, ptr[0..len]);
             break :blk binary;
         },
         else => {
@@ -563,9 +563,9 @@ pub fn registerExecutable(self: *Profiler, exe: hsa.Executable) !void {
 
     try self.load_events.append(self.a, .{
         .event_type = .load_to_gpu_memory,
-        .base_address = text_va +% @bitCast(u64, load_delta),
+        .base_address = text_va +% @as(u64, @bitCast(load_delta)),
         .code_object_hash = hash,
-        .timestamp = @intCast(u64, std.time.nanoTimestamp()),
+        .timestamp = @as(u64, @intCast(std.time.nanoTimestamp())),
     });
 
     var ctx = RegisterExecutableSymbolsCtx{
@@ -629,7 +629,7 @@ pub fn unregisterExecutable(self: *Profiler, exe: hsa.Executable) void {
 pub fn save(self: *Profiler, basename: []const u8) !void {
     const cpu_agent_info = self.agents.keys()[self.cpu_agent];
 
-    for (self.sessions.items) |session, agent_index| {
+    for (self.sessions.items, 0..) |session, agent_index| {
         const gpu_agent_info = self.agents.keys()[agent_index];
         if (gpu_agent_info.properties.agent_type != .gpu)
             continue; // TODO: Can RGP trace CPU stuff? I doubt it, plus who uses HSA for CPUs anyway.

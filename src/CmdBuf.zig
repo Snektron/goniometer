@@ -37,17 +37,17 @@ pub fn words(self: *const Self) []pm4.Word {
 fn emit(self: *Self, packet: []const pm4.Word) void {
     std.debug.assert(self.size + packet.len <= self.cap);
     const buf = self.buf + self.size;
-    for (packet) |word, i| {
+    for (packet, 0..) |word, i| {
         buf[i] = word;
     }
-    self.size += @intCast(u32, packet.len);
+    self.size += @intCast(packet.len);
 }
 
 /// Converts a pointer-to-struct to a packet slice.
 fn asWords(ptr: anytype) []const pm4.Word {
     const Child = std.meta.Child(@TypeOf(ptr));
     std.debug.assert(@bitSizeOf(Child) % @bitSizeOf(pm4.Word) == 0);
-    return @ptrCast([*]const u32, ptr)[0 .. @bitSizeOf(Child) / @bitSizeOf(pm4.Word)];
+    return @as([*]const u32, @ptrCast(ptr))[0 .. @bitSizeOf(Child) / @bitSizeOf(pm4.Word)];
 }
 
 fn pkt2(self: *Self) void {
@@ -65,7 +65,7 @@ fn pkt3Header(self: *Self, opcode: pm4.Opcode, opts: Pkt3Options, data_words: us
         .predicate = opts.predicate,
         .shader_type = opts.shader_type,
         .opcode = opcode,
-        .count_minus_one = @intCast(u14, data_words - 1),
+        .count_minus_one = @intCast(data_words - 1),
     };
     self.emit(asWords(&header));
 }
@@ -76,7 +76,7 @@ fn pkt3(self: *Self, opcode: pm4.Opcode, opts: Pkt3Options, data: []const u32) v
 }
 
 pub fn setShReg(self: *Self, comptime reg: pm4.ShRegister, value: reg.Type()) void {
-    self.setShRegs(reg, &.{@bitCast(u32, value)});
+    self.setShRegs(reg, &.{@bitCast(value)});
 }
 
 pub fn setShRegs(self: *Self, start_reg: pm4.ShRegister, values: []const u32) void {
@@ -86,7 +86,7 @@ pub fn setShRegs(self: *Self, start_reg: pm4.ShRegister, values: []const u32) vo
 }
 
 pub fn setUConfigReg(self: *Self, comptime reg: pm4.UConfigRegister, value: reg.Type()) void {
-    self.setUConfigRegs(reg, &.{@bitCast(u32, value)});
+    self.setUConfigRegs(reg, &.{@bitCast(value)});
 }
 
 pub fn setUConfigRegs(self: *Self, start_reg: pm4.UConfigRegister, values: []const u32) void {
@@ -104,7 +104,7 @@ pub fn setPrivilegedConfigReg(self: *Self, comptime reg: pm4.PrivilegedRegister,
             .wr_confirm = false,
             .engine_sel = 0,
         },
-        .src_addr = @bitCast(u32, value),
+        .src_addr = @as(u32, @bitCast(value)),
         .dst_addr = reg.address(),
     });
 }
@@ -134,8 +134,8 @@ pub fn waitRegMem(
 pub fn indirectBuffer(self: *Self, buf: []const pm4.Word) void {
     const ib = pm4.IndirectBuffer{
         .swap = 0,
-        .ib_base = @truncate(u62, @ptrToInt(buf.ptr) >> 2),
-        .size = @intCast(u20, buf.len),
+        .ib_base = @intCast(@intFromPtr(buf.ptr) >> 2),
+        .size = @intCast(buf.len),
         .chain = 0,
         .offload_polling = 0,
         .valid = 1, // this is what aqlprofile does
@@ -154,7 +154,7 @@ pub const FlushFlags = packed struct {
 };
 
 pub fn cacheFlush(self: *Self, flags: FlushFlags) void {
-    var grc = @bitCast(pm4.AcquireMem.GcrCntl, @as(u32, 0));
+    var grc: pm4.AcquireMem.GcrCntl = @bitCast(@as(u32, 0));
 
     if (flags.icache) {
         grc.gli_inv = .all;
