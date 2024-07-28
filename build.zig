@@ -6,17 +6,17 @@ pub fn build(b: *std.Build) void {
 
     const lib = b.addSharedLibrary(.{
         .name = "goniometer",
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
     lib.linkLibC();
-    lib.addIncludePath(.{ .path = "/opt/rocm/include" });
+    lib.addIncludePath(.{ .cwd_relative = "/opt/rocm/include" });
     b.installArtifact(lib);
 
     const rgp_dump = b.addExecutable(.{
         .name = "rgp-dump",
-        .root_source_file = .{ .path = "src/rgp_dump.zig" },
+        .root_source_file = b.path("src/rgp_dump.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
 
     const rgp_cut = b.addExecutable(.{
         .name = "rgp-cut",
-        .root_source_file = .{ .path = "src/rgp_cut.zig" },
+        .root_source_file = b.path("src/rgp_cut.zig"),
         .target = target,
         .optimize = optimize,
     });

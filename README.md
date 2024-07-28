@@ -8,7 +8,7 @@ Goniometer is a work-in-progress profiling tool for ROCm, specifically targettin
 
 ### Dependencies
 
-Goniometer is written in [zig](https://ziglang.org/), and requires a recent version to build. Additionally, the HSA headers are required. The build file automatically searches for these in the standard include paths as well as `/opt/rocm/include`, which is where the headers are installed by the default ROCm distribution. Alternatively, they can be obtained from [ROCR-Runtime](https://github.com/RadeonOpenCompute/ROCR-Runtime/commits/master/src/inc/) by adding `--search-prefix path/to/ROCR-Runtime/src/inc`.
+Goniometer is written in [zig](https://ziglang.org/), and requires version 0.13 to build. Additionally, the HSA headers are required. The build file automatically searches for these in the standard include paths as well as `/opt/rocm/include`, which is where the headers are installed by the default ROCm distribution. Alternatively, they can be obtained from [ROCR-Runtime](https://github.com/RadeonOpenCompute/ROCR-Runtime/commits/master/src/inc/) by adding `--search-prefix path/to/ROCR-Runtime/src/inc`.
 
 ### Compiling
 
