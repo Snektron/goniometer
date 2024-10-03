@@ -968,6 +968,7 @@ pub const Instance = struct {
         switch (self.amd_memory_pool_free(ptr)) {
             c.HSA_STATUS_SUCCESS => {},
             c.HSA_STATUS_ERROR_NOT_INITIALIZED => unreachable,
+            c.HSA_STATUS_ERROR_INVALID_ALLOCATION => unreachable,
             else => unreachable, // Undocumented error.
         }
     }

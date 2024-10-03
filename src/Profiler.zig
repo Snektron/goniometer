@@ -400,6 +400,7 @@ pub fn destroyQueue(self: *Profiler, queue: *hsa.Queue) !void {
     self.instance.destroySignal(pq.queue.doorbell_signal);
     self.a.free(pq.packetBuffer());
     self.a.destroy(pq);
+    std.debug.assert(self.queues.swapRemoveAdapted(queue.doorbell_signal, ProfileQueue.HashContextByDoorbell{}));
 }
 
 /// Submit a generic packet to the backing queue of a ProfileQueue. This function may block until

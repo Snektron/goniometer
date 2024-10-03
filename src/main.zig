@@ -195,7 +195,3 @@ export fn OnUnload() callconv(.C) void {
     };
     profiler.deinit();
 }
-
-/// HSA does not call OnUnload() properly, so we just hack it in using the shared library destructor.
-// TODO: Make sure that the profiler is not created/destroyed twice?
-export const fini linksection(".fini_array") = &OnUnload;
