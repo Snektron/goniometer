@@ -1,0 +1,11 @@
+.{
+    .name = "goniometer",
+    .version = "0.1.0",
+    .dependencies = .{
+        .hsa = .{
+            .url = "https://github.com/ROCm/ROCR-Runtime/archive/refs/tags/rocm-6.2.2.tar.gz",
+            .hash = "1220f9bb390e8ff5a73b9b56bc1d5422dfc1a996e6751aa45f15b3955835f6b04678",
+        },
+    },
+    .paths = .{""},
+}

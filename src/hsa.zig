@@ -7,11 +7,11 @@ const pm4 = @import("pm4.zig");
 const CmdBuf = @import("CmdBuf.zig");
 
 pub const c = @cImport({
-    @cInclude("hsa/hsa.h");
-    @cInclude("hsa/hsa_ext_amd.h");
-    @cInclude("hsa/hsa_ven_amd_aqlprofile.h");
-    @cInclude("hsa/hsa_ven_amd_loader.h");
-    @cInclude("hsa/amd_hsa_kernel_code.h");
+    @cInclude("hsa.h");
+    @cInclude("hsa_ext_amd.h");
+    @cInclude("hsa_ven_amd_aqlprofile.h");
+    @cInclude("hsa_ven_amd_loader.h");
+    @cInclude("amd_hsa_kernel_code.h");
 });
 
 pub const Status = c.hsa_status_t;
@@ -961,7 +961,7 @@ pub const Instance = struct {
         self: *const Instance,
         buf: anytype,
     ) void {
-        const ptr = switch (@typeInfo(@TypeOf(buf)).Pointer.size) {
+        const ptr = switch (@typeInfo(@TypeOf(buf)).pointer.size) {
             .Slice => buf.ptr,
             else => buf,
         };

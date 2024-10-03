@@ -8,7 +8,7 @@ pub const log_level = .info;
 fn dump(name: []const u8, depth: usize, writer: anytype, val: anytype) !void {
     try writer.writeByteNTimes(' ', depth * 2);
     switch (@typeInfo(@TypeOf(val))) {
-        .Struct => |info| {
+        .@"struct" => |info| {
             try writer.print("{s}:\n", .{name});
             inline for (info.fields) |field| {
                 if (field.name[0] != '_') { // skip reserved and padding fields.
@@ -16,13 +16,13 @@ fn dump(name: []const u8, depth: usize, writer: anytype, val: anytype) !void {
                 }
             }
         },
-        .Enum => try writer.print("{s}: {s} ({}, 0x{x})\n", .{ name, @tagName(val), @intFromEnum(val), @intFromEnum(val) }),
-        .Array => |info| switch (info.child) {
+        .@"enum" => try writer.print("{s}: {s} ({}, 0x{x})\n", .{ name, @tagName(val), @intFromEnum(val), @intFromEnum(val) }),
+        .array => |info| switch (info.child) {
             u8 => try writer.print("{s}: {s}\n", .{ name, val }),
             else => try writer.print("{s}: {any}\n", .{ name, val }),
         },
-        .Float => try writer.print("{s}: {d}\n", .{ name, val }),
-        .Int => try writer.print("{s}: {} (0x{x})\n", .{ name, val, val }),
+        .float => try writer.print("{s}: {d}\n", .{ name, val }),
+        .int => try writer.print("{s}: {} (0x{x})\n", .{ name, val, val }),
         else => try writer.print("{s}: {}\n", .{ name, val }),
     }
 }
